@@ -2641,6 +2641,30 @@ def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | Non
     return {"service_tier": "priority"}
 
 
+_SERVICE_TIER_INCOMPATIBLE_PROVIDERS = frozenset({"deepseek", "openrouter"})
+
+
+def resolve_service_tier_overrides(
+    model_id: Optional[str], provider: Optional[str] = None
+) -> dict[str, Any] | None:
+    """Resolve fast overrides while guarding providers that reject service_tier.
+
+    ``resolve_fast_mode_overrides`` is model-capability based because the same
+    model can be served by several providers.  This wrapper adds the runtime
+    provider guard needed at inheritance/fallback boundaries: OpenRouter and
+    DeepSeek must never receive an OpenAI ``service_tier`` field.  Anthropic's
+    separate ``speed`` override remains available when its own capability
+    resolver allows it.
+    """
+    overrides = resolve_fast_mode_overrides(model_id)
+    if not overrides or "service_tier" not in overrides:
+        return overrides
+    provider_id = normalize_provider(provider) if provider else ""
+    if provider_id in _SERVICE_TIER_INCOMPATIBLE_PROVIDERS:
+        return None
+    return overrides
+
+
 def _resolve_copilot_catalog_api_key() -> str:
     """Best-effort GitHub token for fetching the Copilot model catalog.
 

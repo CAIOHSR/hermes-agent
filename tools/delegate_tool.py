@@ -1506,6 +1506,40 @@ def _build_child_agent(
     if isinstance(child_max_tokens, int):
         child_optional_kwargs["max_tokens"] = child_max_tokens
 
+    # Fast mode is session state, not a credential override.  Carry the
+    # effective fast preference into a child only after resolving it against
+    # the child's actual model/provider.  This keeps Luna priority processing
+    # on the inherited path while stripping service_tier for incompatible
+    # DeepSeek/OpenRouter targets and stale parent overrides.
+    from hermes_cli.models import resolve_service_tier_overrides
+
+    parent_request_overrides = dict(
+        getattr(parent_agent, "request_overrides", {}) or {}
+    )
+    configured_request_overrides = dict(
+        override_request_overrides or {}
+        if override_provider
+        else parent_request_overrides
+    )
+    parent_fast = bool(getattr(parent_agent, "service_tier", None)) or any(
+        configured_request_overrides.get(key) in {"fast", "priority"}
+        for key in ("service_tier", "speed")
+    )
+    configured_request_overrides.pop("service_tier", None)
+    configured_request_overrides.pop("speed", None)
+    child_fast_overrides = (
+        resolve_service_tier_overrides(effective_model, effective_provider)
+        if parent_fast
+        else None
+    )
+    if child_fast_overrides:
+        configured_request_overrides.update(child_fast_overrides)
+    child_service_tier = (
+        child_fast_overrides.get("service_tier")
+        if child_fast_overrides
+        else None
+    )
+
     from agent.delegation_context import delegated_child_context
 
     with delegated_child_context():
@@ -1540,11 +1574,8 @@ def _build_child_agent(
             provider_sort=child_provider_sort,
             provider_require_parameters=child_provider_require_parameters,
             provider_data_collection=child_provider_data_collection,
-            request_overrides=(
-                dict(override_request_overrides or {})
-                if override_provider
-                else dict(getattr(parent_agent, "request_overrides", {}) or {})
-            ),
+            service_tier=child_service_tier,
+            request_overrides=configured_request_overrides,
             openrouter_min_coding_score=child_openrouter_min_coding_score,
             tool_progress_callback=child_progress_cb,
             iteration_budget=None,  # fresh budget per subagent

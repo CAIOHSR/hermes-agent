@@ -3378,6 +3378,26 @@ def run_job(
             _cfg if isinstance(_cfg, dict) else {}, str(model)
         )
 
+        # ``agent.service_tier`` is a fast-mode preference, not a request
+        # field to forward blindly. Resolve it after the primary/fallback
+        # model and provider are known so incompatible DeepSeek/OpenRouter
+        # runtimes receive neither the agent attribute nor service_tier.
+        from hermes_cli.models import resolve_service_tier_overrides
+
+        runtime_provider = str(runtime.get("provider") or "").strip().lower()
+        cron_request_overrides = dict(runtime.get("request_overrides") or {})
+        cron_request_overrides.pop("service_tier", None)
+        cron_request_overrides.pop("speed", None)
+        cron_service_tier = None
+        raw_service_tier = str(agent_cfg.get("service_tier") or "").strip().lower()
+        if raw_service_tier in {"fast", "priority", "on"}:
+            cron_fast_overrides = resolve_service_tier_overrides(
+                str(model), runtime_provider
+            )
+            if cron_fast_overrides:
+                cron_request_overrides.update(cron_fast_overrides)
+                cron_service_tier = cron_fast_overrides.get("service_tier")
+
         # Provider/model-drift fail-closed guard (#44585).
         #
         # An UNPINNED job (no explicit job["provider"]/["model"]) follows the
@@ -3497,6 +3517,8 @@ def run_job(
             acp_args=runtime.get("args"),
             max_iterations=max_iterations,
             reasoning_config=reasoning_config,
+            service_tier=cron_service_tier,
+            request_overrides=cron_request_overrides,
             prefill_messages=prefill_messages,
             fallback_model=fallback_model,
             credential_pool=credential_pool,

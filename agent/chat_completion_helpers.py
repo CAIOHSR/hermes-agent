@@ -58,6 +58,31 @@ _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
 
+def _refresh_fast_mode_request_overrides(agent) -> None:
+    """Re-resolve fast request fields after a provider/model switch.
+
+    Fallbacks mutate an existing AIAgent in place. A priority field computed
+    for the primary model must not leak into an incompatible fallback, and a
+    later primary restore must be able to re-enable it. Keep unrelated request
+    overrides intact while rebuilding only the fast-mode fields.
+    """
+    request_overrides = dict(getattr(agent, "request_overrides", {}) or {})
+    request_overrides.pop("service_tier", None)
+    request_overrides.pop("speed", None)
+    if getattr(agent, "service_tier", None):
+        try:
+            from hermes_cli.models import resolve_service_tier_overrides
+
+            fast_overrides = resolve_service_tier_overrides(
+                getattr(agent, "model", None), getattr(agent, "provider", None)
+            )
+        except Exception:
+            fast_overrides = None
+        if fast_overrides:
+            request_overrides.update(fast_overrides)
+    agent.request_overrides = request_overrides
+
+
 def _context_thread_target(callback):
     """Bind a no-argument thread target to the caller's ContextVars."""
     context = contextvars.copy_context()
@@ -1925,6 +1950,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.requested_provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+        _refresh_fast_mode_request_overrides(agent)
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True

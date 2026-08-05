@@ -1537,6 +1537,12 @@ def restore_primary_runtime(agent) -> bool:
         agent.requested_provider = rt.get("requested_provider", agent.provider)
         agent.base_url = rt["base_url"]           # setter updates _base_url_lower
         agent.api_mode = rt["api_mode"]
+        # Re-enable the primary model's fast override after a compatible
+        # fallback was stripped, or keep it absent when the primary provider
+        # itself cannot accept service_tier.
+        from agent.chat_completion_helpers import _refresh_fast_mode_request_overrides
+
+        _refresh_fast_mode_request_overrides(agent)
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]

@@ -53,6 +53,8 @@ def _make_mock_parent(depth=0):
     parent._print_fn = None
     parent.tool_progress_callback = None
     parent.thinking_callback = None
+    parent.service_tier = None
+    parent.request_overrides = {}
     return parent
 
 
@@ -286,6 +288,80 @@ class TestDelegateTask(unittest.TestCase):
             self.assertEqual(kwargs["api_key"], parent.api_key)
             self.assertEqual(kwargs["provider"], parent.provider)
             self.assertEqual(kwargs["api_mode"], parent.api_mode)
+
+    def test_child_inherits_fast_service_tier_for_luna(self):
+        parent = _make_mock_parent(depth=0)
+        parent.provider = "openai"
+        parent.model = "gpt-5.6-luna"
+        parent.service_tier = "priority"
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Keep priority processing",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["service_tier"], "priority")
+        self.assertEqual(kwargs["request_overrides"], {"service_tier": "priority"})
+
+    def test_child_normal_does_not_inherit_service_tier(self):
+        parent = _make_mock_parent(depth=0)
+        parent.provider = "openai"
+        parent.model = "gpt-5.6-luna"
+        parent.service_tier = None
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Use normal processing",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertIsNone(kwargs["service_tier"])
+        self.assertEqual(kwargs["request_overrides"], {})
+
+    def test_child_strips_tier_for_incompatible_model_or_provider(self):
+        for child_model, child_provider in (
+            ("deepseek-chat", "deepseek"),
+            ("gpt-5.6-luna", "openrouter"),
+        ):
+            parent = _make_mock_parent(depth=0)
+            parent.provider = "openai"
+            parent.model = "gpt-5.6-luna"
+            parent.service_tier = "priority"
+
+            with patch("run_agent.AIAgent") as MockAgent:
+                MockAgent.return_value = MagicMock()
+                _build_child_agent(
+                    task_index=0,
+                    goal="Do not send an unsupported tier",
+                    context=None,
+                    toolsets=None,
+                    model=child_model,
+                    max_iterations=10,
+                    parent_agent=parent,
+                    task_count=1,
+                    override_provider=child_provider,
+                )
+
+            _, kwargs = MockAgent.call_args
+            self.assertIsNone(kwargs["service_tier"])
+            self.assertNotIn("service_tier", kwargs["request_overrides"])
 
     def test_nous_child_rederives_api_mode_from_model(self):
         """Portal is dual-wire — same provider + different model prefix must
