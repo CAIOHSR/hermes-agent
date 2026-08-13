@@ -286,6 +286,80 @@ def test_telegram_final_response_sanitizes_raw_provider_errors():
     assert "req_abc" not in sanitized
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        (
+            "API call failed after 3 retries: OSError: [Errno 24] Too many "
+            "open files: '/Users/operator/.hermes/state.db' "
+            "Authorization: Bearer sk-ABCDEF0123456789abcdef0123"
+        ),
+        (
+            "❌ API failed after 3 retries — OSError: [Errno 23] Too many "
+            "open files in system: /srv/hermes/state.db"
+        ),
+        "OSError: [Errno 24] Too many open files: '/private/service.sock'",
+        "OSError: [Errno 23] File table overflow: '/private/service.sock'",
+    ],
+)
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_chat_gateway_identifies_local_fd_exhaustion_without_leaking_details(
+    platform, raw
+):
+    """EMFILE/ENFILE is a local gateway failure, not a provider failure.
+
+    The reply is intentionally static: the raw exception can contain a local
+    path or credential copied into exception context, neither of which may be
+    delivered to a chat surface.
+    """
+    sanitized = _sanitize_gateway_final_response(platform, raw)
+
+    assert "local" in sanitized.lower()
+    assert "file descriptor" in sanitized.lower()
+    assert "not at the model provider" in sanitized.lower()
+    assert "provider failed after retries" not in sanitized.lower()
+    assert "state.db" not in sanitized
+    assert "service.sock" not in sanitized
+    assert "sk-ABCDEF" not in sanitized
+    assert "Errno" not in sanitized
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_chat_gateway_status_identifies_local_fd_exhaustion(platform):
+    """Status callbacks use the same safe local-origin classification."""
+    raw = (
+        "⚠️ Max retries (3) exhausted — [Errno 24] Too many open files: "
+        "'/secret/path'"
+    )
+
+    sanitized = _prepare_gateway_status_message(platform, "lifecycle", raw)
+
+    assert sanitized is not None
+    assert "local" in sanitized.lower()
+    assert "not at the model provider" in sanitized.lower()
+    assert "/secret/path" not in sanitized
+
+
+@pytest.mark.parametrize("platform", ["local", "api_server", "webhook"])
+def test_programmatic_surfaces_keep_raw_local_fd_diagnostics(platform):
+    """The existing raw-text contract remains intact for diagnostic clients."""
+    raw = "API call failed after 3 retries: [Errno 24] Too many open files: '/tmp/x'"
+
+    assert _sanitize_gateway_final_response(platform, raw) == raw
+    assert _prepare_gateway_status_message(platform, "error", raw) == raw
+
+
+@pytest.mark.parametrize("platform", CHAT_PLATFORMS)
+def test_normal_prose_about_open_files_is_not_rewritten(platform):
+    """A user-facing explanation must not be mistaken for a local outage."""
+    answer = (
+        "The phrase 'too many open files' usually means a process reached its "
+        "file descriptor limit; here is how to inspect it."
+    )
+
+    assert _sanitize_gateway_final_response(platform, answer) == answer
+
+
 def test_telegram_final_response_redacts_auth_secrets():
     """Authentication errors should be useful without leaking key material."""
     raw = (

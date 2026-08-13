@@ -399,6 +399,32 @@ _GATEWAY_RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Local descriptor exhaustion is commonly wrapped by an SDK as a generic
+# connection/provider failure.  By the time the gateway receives the final
+# response it is text, so retain both POSIX spellings (EMFILE/ENFILE) and the
+# Python OSError forms.  Detection is also gated on an error-envelope prefix
+# in _looks_like_gateway_local_fd_exhaustion: ordinary assistant prose that
+# explains "too many open files" must remain untouched.
+_GATEWAY_LOCAL_FD_EXHAUSTION_RE = re.compile(
+    r"("
+    r"\[\s*errno\s+(?:23|24)\s*\]\s*"
+    r"(?:too\s+many\s+open\s+files(?:\s+in\s+system)?|file\s+table\s+overflow)"
+    r"|\b(?:emfile|enfile)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_GATEWAY_LOCAL_ERROR_SHAPE_RE = re.compile(
+    r"^\s*(\W*\s*)?("
+    r"api\s+(?:call\s+)?failed"
+    r"|non-retryable\s+error"
+    r"|max\s+retries\s*\(\d+\)\s+exhausted"
+    r"|oserror\b"
+    r"|error\s+code\s*:"
+    r")",
+    re.IGNORECASE,
+)
+
 _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_\-]{12,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
@@ -658,8 +684,37 @@ def _format_exec_approval_fallback(
     )
 
 
+def _looks_like_gateway_local_fd_exhaustion(text: str) -> bool:
+    """True for a local EMFILE/ENFILE error envelope.
+
+    Provider SDKs routinely collapse a local socket/open failure into their
+    generic connection exception.  The agent then serializes that exception as
+    ``API call failed after retries``.  Requiring both the error-shaped prefix
+    and an OS-level descriptor marker avoids rewriting ordinary explanations.
+    The bounded probe is enough to cover the agent's truncated error summary
+    without scanning arbitrary assistant output.
+    """
+    if not text:
+        return False
+    body = str(text).strip()
+    if not _GATEWAY_LOCAL_ERROR_SHAPE_RE.search(body):
+        return False
+    return bool(_GATEWAY_LOCAL_FD_EXHAUSTION_RE.search(body[:800]))
+
+
+def _gateway_local_fd_exhaustion_reply() -> str:
+    """Return a static reply so exception paths, secrets, and bodies stay local."""
+    return (
+        "⚠️ Hermes exhausted the local file descriptor limit. This happened "
+        "on the gateway host, not at the model provider. Check gateway logs, "
+        "then inspect or restart the Hermes service."
+    )
+
+
 def _gateway_provider_error_reply(text: str) -> str:
-    """Map raw provider/API errors to a short user-safe Telegram reply."""
+    """Map raw infrastructure/provider errors to a short user-safe reply."""
+    if _looks_like_gateway_local_fd_exhaustion(text):
+        return _gateway_local_fd_exhaustion_reply()
     if _GATEWAY_AUTH_ERROR_RE.search(text):
         return (
             "⚠️ Provider authentication failed. Check the configured credentials; "
@@ -709,6 +764,8 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
     if not text:
         return False
     body = str(text).strip()
+    if _looks_like_gateway_local_fd_exhaustion(body):
+        return True
     # Provider failure envelopes are short. Assistant answers that happen
     # to mention HTTP status codes ("HTTP 404 means...") tend to be longer.
     if len(body) > 400 or body.count("\n") > 4:
@@ -750,6 +807,8 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
+    if _looks_like_gateway_local_fd_exhaustion(redacted):
+        return _gateway_local_fd_exhaustion_reply()
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
@@ -768,6 +827,11 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
         return text
 
     text = _redact_gateway_user_facing_secrets(text)
+    # Local EMFILE/ENFILE must win over the retry-noise filter below. An SDK
+    # may phrase it as "max retries exhausted", but suppressing it would hide
+    # the actionable gateway-host outage from the operator.
+    if _looks_like_gateway_local_fd_exhaustion(text):
+        return _gateway_local_fd_exhaustion_reply()
     if _TELEGRAM_NOISY_STATUS_RE.search(text):
         # Opt-in #52995: `compression.progress_notices: true` lets ROUTINE
         # compression progress statuses through to chat platforms. The

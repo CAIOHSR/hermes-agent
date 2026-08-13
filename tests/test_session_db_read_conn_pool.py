@@ -29,13 +29,16 @@ after the close; past the ceiling readers degrade to the locked writer
 connection. Tests that join their workers before counting cannot see any of
 this, so the peak assertions use a barrier.
 
-These assert on the pool/registry counts, never on ``lsof``: SQLite's unix VFS
-parks a closed descriptor on a per-inode reuse list while any connection still
-holds POSIX locks on that inode, so raw descriptor counts lag the real
-connection count and make such assertions flaky.
+Peak assertions use the pool/registry counts, never ``lsof``: SQLite's unix
+VFS parks a closed descriptor on a per-inode reuse list while any connection
+still holds POSIX locks on that inode, so raw descriptor counts lag the real
+connection count. The controlled teardown test may compare the process fd
+baseline only after the sole writer and every reader have closed.
 """
 
+import os
 import threading
+import time
 
 import pytest
 
@@ -48,6 +51,16 @@ def _live_count(path) -> int:
 
     with mod._live_lock:
         return mod._live_connections.get(mod._key(path), 0)
+
+
+def _process_fd_count():
+    """Return this process's open-fd count where the host exposes one."""
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(directory))
+        except OSError:
+            continue
+    return None
 
 
 @pytest.fixture()
@@ -384,3 +397,121 @@ def test_close_returns_every_permit(db):
     for _ in range(_READ_POOL_MAX):
         assert db._read_permits.acquire(blocking=False), "close() stranded a permit"
     assert not db._read_permits.acquire(blocking=False), "close() over-released"
+
+
+@pytest.mark.requires_wal
+def test_controlled_read_write_load_stays_bounded_and_returns_to_baseline(tmp_path):
+    """Real concurrent reads + a writer stay at 8 readers and one writer.
+
+    Eight readers hold pooled read connections while a transaction holds the
+    writer lock. A second wave must fall back to that writer instead of opening
+    more connections. Once released, every query completes and ``close()``
+    returns both the tracked-connection registry and process fd count to their
+    exact pre-test baselines.
+    """
+    from hermes_state import _READ_POOL_MAX
+
+    db_path = tmp_path / "load-state.db"
+    registry_baseline = _live_count(db_path)
+    fd_baseline = _process_fd_count()
+    d = SessionDB(db_path=db_path)
+    d.create_session(session_id="load", source="cli", model="m")
+    d.append_message("load", role="user", content="load probe")
+
+    readers_ready = threading.Barrier(_READ_POOL_MAX + 1)
+    release_readers = threading.Event()
+    writer_entered = threading.Event()
+    release_writer = threading.Event()
+    errors = []
+
+    def held_reader():
+        try:
+            with d._read_ctx() as conn:
+                assert conn is not d._conn
+                assert conn.execute(
+                    "SELECT id FROM sessions WHERE id = ?", ("load",)
+                ).fetchone()[0] == "load"
+                readers_ready.wait(timeout=30)
+                assert release_readers.wait(timeout=30)
+        except BaseException as exc:  # noqa: BLE001 - preserve thread failures
+            errors.append(exc)
+
+    def held_writer():
+        def write(conn):
+            conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?", ("updated", "load")
+            )
+            writer_entered.set()
+            assert release_writer.wait(timeout=30)
+
+        try:
+            d._execute_write(write)
+        except BaseException as exc:  # noqa: BLE001 - preserve thread failures
+            errors.append(exc)
+
+    def overflow_reader():
+        try:
+            overflow_results.append(d.get_session("load")["id"])
+        except BaseException as exc:  # noqa: BLE001 - preserve thread failures
+            errors.append(exc)
+
+    readers = [threading.Thread(target=held_reader) for _ in range(_READ_POOL_MAX)]
+    writer = threading.Thread(target=held_writer)
+    writer_started = False
+    overflow = []
+    overflow_results = []
+
+    try:
+        for thread in readers:
+            thread.start()
+        readers_ready.wait(timeout=30)
+        assert _live_count(db_path) == registry_baseline + _READ_POOL_MAX + 1
+
+        writer.start()
+        writer_started = True
+        assert writer_entered.wait(timeout=30)
+
+        overflow = [
+            threading.Thread(target=overflow_reader)
+            for _ in range(16)
+        ]
+        for thread in overflow:
+            thread.start()
+
+        deadline = time.monotonic() + 10
+        while d._read_permit_exhausted < len(overflow) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert d._read_permit_exhausted >= len(overflow)
+        assert _live_count(db_path) == registry_baseline + _READ_POOL_MAX + 1
+
+        release_writer.set()
+        writer.join(timeout=30)
+        for thread in overflow:
+            thread.join(timeout=30)
+            assert not thread.is_alive()
+        assert not errors
+        assert overflow_results == ["load"] * len(overflow)
+
+        release_readers.set()
+        for thread in readers:
+            thread.join(timeout=30)
+            assert not thread.is_alive()
+        assert not errors
+        assert d.get_session("load")["title"] == "updated"
+        assert _live_count(db_path) <= registry_baseline + _READ_POOL_MAX + 1
+    finally:
+        release_writer.set()
+        release_readers.set()
+        if writer_started:
+            writer.join(timeout=30)
+        for thread in overflow:
+            thread.join(timeout=30)
+        for thread in readers:
+            thread.join(timeout=30)
+        d.close()
+
+    assert _live_count(db_path) == registry_baseline
+    fd_after = _process_fd_count()
+    if fd_baseline is not None and fd_after is not None:
+        assert fd_after == fd_baseline
