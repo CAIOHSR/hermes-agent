@@ -164,10 +164,15 @@ class TestTempHomeServiceDefinitionGuard:
 
 class TestLaunchdPlistComparison:
     @staticmethod
-    def _plist(python_path: Path) -> str:
+    def _plist(python_path: Path, virtual_env: Path | None = None) -> str:
+        virtual_env_entry = (
+            f"<key>VIRTUAL_ENV</key><string>{virtual_env}</string>"
+            if virtual_env is not None
+            else ""
+        )
         return f"""<plist><dict>
 <key>ProgramArguments</key><array><string>{python_path}</string><string>-m</string></array>
-<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin</string></dict>
+<key>EnvironmentVariables</key><dict>{virtual_env_entry}<key>PATH</key><string>/usr/bin</string></dict>
 </dict></plist>"""
 
     def test_treats_symlinked_virtualenv_directory_as_current(self, tmp_path):
@@ -195,6 +200,36 @@ class TestLaunchdPlistComparison:
 
         installed = self._plist(first / "python")
         expected = self._plist(second / "python")
+
+        assert gateway_cli._normalize_launchd_plist_for_comparison(
+            installed
+        ) != gateway_cli._normalize_launchd_plist_for_comparison(expected)
+
+    def test_treats_symlinked_virtual_env_value_as_current(self, tmp_path):
+        real_venv = tmp_path / ".venv"
+        real_venv.mkdir()
+        alias_venv = tmp_path / "venv"
+        alias_venv.symlink_to(real_venv, target_is_directory=True)
+        executable = tmp_path / "python"
+        executable.write_text("fixture", encoding="utf-8")
+
+        installed = self._plist(executable, real_venv)
+        expected = self._plist(executable, alias_venv)
+
+        assert gateway_cli._normalize_launchd_plist_for_comparison(
+            installed
+        ) == gateway_cli._normalize_launchd_plist_for_comparison(expected)
+
+    def test_keeps_distinct_virtual_env_values_stale(self, tmp_path):
+        first_venv = tmp_path / "first"
+        second_venv = tmp_path / "second"
+        first_venv.mkdir()
+        second_venv.mkdir()
+        executable = tmp_path / "python"
+        executable.write_text("fixture", encoding="utf-8")
+
+        installed = self._plist(executable, first_venv)
+        expected = self._plist(executable, second_venv)
 
         assert gateway_cli._normalize_launchd_plist_for_comparison(
             installed
