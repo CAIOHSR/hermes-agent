@@ -3135,6 +3135,25 @@ def _normalize_launchd_plist_for_comparison(text: str) -> str:
         count=1,
         flags=re.S,
     )
+
+    # ``generate_launchd_plist`` also records the active virtualenv directory.
+    # Keep it aligned with the executable comparison above: ``venv`` and
+    # ``.venv`` are equivalent only when both resolve to the same directory.
+    def _canonicalize_virtual_env(match: re.Match[str]) -> str:
+        raw_path = match.group(2)
+        try:
+            canonical = Path(raw_path).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return match.group(0)
+        return f"{match.group(1)}{canonical}{match.group(3)}"
+
+    normalized = re.sub(
+        r"(<key>VIRTUAL_ENV</key>\s*<string>)(.*?)(</string>)",
+        _canonicalize_virtual_env,
+        normalized,
+        count=1,
+        flags=re.S,
+    )
     return re.sub(
         r"(<key>PATH</key>\s*<string>)(.*?)(</string>)",
         r"\1__HERMES_PATH__\3",
