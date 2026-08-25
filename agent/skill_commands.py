@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _skill_commands: Dict[str, Dict[str, Any]] = {}
 _skill_commands_platform: Optional[str] = None
 _skill_commands_home: Optional[str] = None
+_skill_commands_offer_hidden: frozenset[str] = frozenset()
 # Guards the (map, platform-tag, home-tag) triple so publication and the
 # freshness lookup always see a consistent snapshot. Scanning itself stays
 # outside this lock.
@@ -428,6 +429,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         Dict mapping "/skill-name" to {name, description, skill_md_path, skill_dir}.
     """
     global _skill_commands, _skill_commands_platform, _skill_commands_home
+    global _skill_commands_offer_hidden
     platform = _resolve_skill_commands_platform()
     home = _resolve_skill_commands_home()
     # Build into a local map and publish once, at the end. Writing straight
@@ -437,9 +439,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     # published slugs, logging one bogus "already claimed" warning per skill —
     # each naming the same skill as its own incumbent (#74574).
     commands: Dict[str, Dict[str, Any]] = {}
+    offer_hidden: set[str] = set()
     try:
         from tools.skills_tool import SKILLS_DIR, _parse_frontmatter, skill_matches_platform, skill_matches_environment, _get_disabled_skill_names
         from agent.skill_utils import (
+            get_offer_hidden_skill_names,
             get_external_skills_dirs,
             get_project_skills_dirs,
             iter_project_skill_files,
@@ -447,6 +451,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         )
         from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
+        offer_hidden = get_offer_hidden_skill_names()
         seen_names: set = set()
 
         # Scan project dirs first (highest precedence), then local, then external.
@@ -480,7 +485,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                     if name in seen_names:
                         continue
                     # Respect user's disabled skills config
-                    if name in disabled:
+                    if name in disabled or name in offer_hidden:
                         continue
                     description = frontmatter.get('description', '')
                     if not description:
@@ -544,6 +549,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         _skill_commands = commands
         _skill_commands_platform = platform
         _skill_commands_home = home
+        _skill_commands_offer_hidden = frozenset(offer_hidden)
     return commands
 
 
@@ -558,6 +564,9 @@ def get_skill_commands() -> Dict[str, Dict[str, Any]]:
     """
     current_platform = _resolve_skill_commands_platform()
     current_home = _resolve_skill_commands_home()
+    from agent.skill_utils import get_offer_hidden_skill_names
+
+    current_offer_hidden = frozenset(get_offer_hidden_skill_names())
     # Read the map and its tags under the same lock that publishes them, so
     # the freshness decision is made against a consistent snapshot.
     with _publish_lock:
@@ -566,6 +575,7 @@ def get_skill_commands() -> Dict[str, Dict[str, Any]]:
             bool(commands)
             and _skill_commands_platform == current_platform
             and _skill_commands_home == current_home
+            and _skill_commands_offer_hidden == current_offer_hidden
         )
     if is_fresh:
         return commands

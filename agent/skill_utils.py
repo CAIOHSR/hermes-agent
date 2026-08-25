@@ -483,6 +483,31 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
     return global_disabled - ESSENTIAL_SKILLS
 
 
+def get_offer_hidden_skill_names() -> Set[str]:
+    """Return canonical skill names hidden from offer-time surfaces.
+
+    ``skills.offer_hidden`` is intentionally a strict list-of-strings
+    configuration value.  Malformed values fail safe by returning no hidden
+    names rather than accidentally hiding or blocking a skill.  This helper is
+    the single policy boundary used by prompts, listings, and slash commands;
+    explicit ``skill_view``, preload, and cron skill loading do not call it.
+    """
+    parsed = _load_raw_config()
+    if not parsed:
+        return set()
+
+    skills_cfg = parsed.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return set()
+
+    configured = skills_cfg.get("offer_hidden")
+    if not isinstance(configured, list) or any(
+        not isinstance(name, str) for name in configured
+    ):
+        return set()
+    return {name.strip() for name in configured if name.strip()}
+
+
 def parse_config_string_list(value) -> List[str]:
     """Normalize a config value that may hold a JSON-array string into a list.
 

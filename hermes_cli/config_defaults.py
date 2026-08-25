@@ -2130,6 +2130,10 @@ DEFAULT_CONFIG = {
     # always goes to ~/.hermes/skills/.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        # Canonical skill names hidden from offer-time surfaces (prompt index,
+        # skills_list, and slash/autocomplete). Explicit skill_view, --skills
+        # preload, and cron skill loading remain available.
+        "offer_hidden": [],
         # Project-local skill discovery: when a session starts inside a git
         # checkout, ``<root>/.hermes/skills/`` and ``<root>/.agents/skills/``
         # are sourced as the highest-precedence skill tier — but ONLY when the
