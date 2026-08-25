@@ -1024,6 +1024,12 @@ skills:
   #   - ~/.agents/skills
   #   - /home/shared/team-skills
 
+  # Canonical skill names hidden from the default offer surfaces (prompt index,
+  # skills_list, and slash/autocomplete). Explicit skill_view, --skills preload,
+  # and cron skill loading remain available.
+  # offer_hidden:
+  #   - my-on-demand-skill
+
 # =============================================================================
 # Agent Behavior
 # =============================================================================
