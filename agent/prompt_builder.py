@@ -33,6 +33,7 @@ from agent.skill_utils import (
     extract_skill_description,
     get_all_skills_dirs,
     get_disabled_skill_names,
+    get_offer_hidden_skill_names,
     iter_skill_index_files,
     org_id_of_path,
     parse_frontmatter,
@@ -1836,6 +1837,7 @@ def _build_skills_system_prompt_inner(
     # produce distinct cache entries (gateway serves multiple platforms).
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
+    offer_hidden = get_offer_hidden_skill_names()
     project_dirs = project_dirs or []
     cache_key = (
         str(skills_dir),
@@ -1845,6 +1847,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        tuple(sorted(offer_hidden)),
         tuple(sorted(compact_categories or ())),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
@@ -1873,7 +1876,12 @@ def _build_skills_system_prompt_inner(
             platforms = entry.get("platforms") or []
             if not skill_matches_platform_list(platforms):
                 continue
-            if frontmatter_name in disabled or skill_name in disabled:
+            if (
+                frontmatter_name in disabled
+                or skill_name in disabled
+                or frontmatter_name in offer_hidden
+                or skill_name in offer_hidden
+            ):
                 continue
             if not _skill_should_show(
                 entry.get("conditions") or {},
@@ -1896,7 +1904,12 @@ def _build_skills_system_prompt_inner(
             if not is_compatible:
                 continue
             skill_name = entry["skill_name"]
-            if entry["frontmatter_name"] in disabled or skill_name in disabled:
+            if (
+                entry["frontmatter_name"] in disabled
+                or skill_name in disabled
+                or entry["frontmatter_name"] in offer_hidden
+                or skill_name in offer_hidden
+            ):
                 continue
             if not _skill_should_show(
                 extract_skill_conditions(frontmatter),
@@ -1928,7 +1941,12 @@ def _build_skills_system_prompt_inner(
                     fm_name = entry["frontmatter_name"]
                     if fm_name in project_names:
                         continue
-                    if fm_name in disabled or entry["skill_name"] in disabled:
+                    if (
+                        fm_name in disabled
+                        or entry["skill_name"] in disabled
+                        or fm_name in offer_hidden
+                        or entry["skill_name"] in offer_hidden
+                    ):
                         continue
                     if not _skill_should_show(
                         extract_skill_conditions(frontmatter),
@@ -2028,7 +2046,12 @@ def _build_skills_system_prompt_inner(
                 frontmatter_name = entry["frontmatter_name"]
                 if frontmatter_name in seen_skill_names:
                     continue
-                if frontmatter_name in disabled or skill_name in disabled:
+                if (
+                    frontmatter_name in disabled
+                    or skill_name in disabled
+                    or frontmatter_name in offer_hidden
+                    or skill_name in offer_hidden
+                ):
                     continue
                 if not _skill_should_show(
                     extract_skill_conditions(frontmatter),

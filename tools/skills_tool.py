@@ -83,6 +83,7 @@ from hermes_cli.config import cfg_get
 from utils import env_var_enabled
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS,
+    get_offer_hidden_skill_names as _get_offer_hidden_skill_names,
     is_skill_support_path as _is_skill_support_path,
 )
 
@@ -104,7 +105,7 @@ _SKILLS_CACHE_KEY_DISABLED = "with_disabled"
 _SKILLS_CACHE_KEY_FILTERED = "filtered"
 
 
-def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
+def _skills_scan_signature(dirs_to_scan, disabled, offer_hidden=()) -> tuple:
     """Cheap change-signature for the skill scan inputs.
 
     O(#dirs + #categories) stat calls, not a recursive walk. Includes the
@@ -134,7 +135,7 @@ def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
         except OSError:
             pass
         sig.append((str(d), m))
-    return (tuple(sig), frozenset(disabled), platform)
+    return (tuple(sig), frozenset(disabled), frozenset(offer_hidden), platform)
 
 
 # All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
@@ -711,6 +712,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill). Part of the cache signature:
     # disabling a skill is a config change with no filesystem mtime bump.
     disabled = set() if skip_disabled else _get_disabled_skill_names()
+    offer_hidden = set() if skip_disabled else _get_offer_hidden_skill_names()
 
     # Collect directories to scan — same resolution as the scan loop below
     # (_skills_dir() resolves the LIVE profile HERMES_HOME; the module-level
@@ -724,7 +726,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
         dirs_to_scan.append(active_skills_dir)
     dirs_to_scan.extend(get_external_skills_dirs())
 
-    signature = _skills_scan_signature(dirs_to_scan, disabled)
+    signature = _skills_scan_signature(dirs_to_scan, disabled, offer_hidden)
     now = time.monotonic()
 
     cached = _SKILLS_CACHE.get(cache_key)
@@ -770,7 +772,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 name = frontmatter.get("name", skill_dir.name)[:MAX_NAME_LENGTH]
                 if name in seen_names:
                     continue
-                if name in disabled:
+                if name in disabled or name in offer_hidden:
                     continue
 
                 description = frontmatter.get("description", "")
@@ -836,6 +838,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
 
         # Find all skills
         all_skills = _find_all_skills()
+        offer_hidden = _get_offer_hidden_skill_names()
         try:
             from hermes_cli.plugins import discover_plugins, get_plugin_manager
 
@@ -844,7 +847,10 @@ def skills_list(category: str = None, task_id: str = None) -> str:
                 frontmatter = plugin_skill.pop("frontmatter", {})
                 if not skill_matches_platform(frontmatter):
                     continue
-                if _is_skill_disabled(plugin_skill["name"]):
+                if (
+                    plugin_skill["name"] in offer_hidden
+                    or _is_skill_disabled(plugin_skill["name"])
+                ):
                     continue
                 all_skills.append(plugin_skill)
         except Exception:

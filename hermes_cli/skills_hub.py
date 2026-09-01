@@ -1006,7 +1006,10 @@ def do_list(source_filter: str = "all",
     from tools.skills_hub import HubLockFile, ensure_hub_dirs
     from tools.skills_sync import _read_manifest
     from tools.skills_tool import _find_all_skills
-    from agent.skill_utils import get_disabled_skill_names
+    from agent.skill_utils import (
+        get_disabled_skill_names,
+        get_offer_hidden_skill_names,
+    )
 
     c = console or _console
     ensure_hub_dirs()
@@ -1017,6 +1020,7 @@ def do_list(source_filter: str = "all",
     # Pull ALL skills (including disabled ones) so we can annotate status.
     all_skills = _find_all_skills(skip_disabled=True)
     disabled_names = get_disabled_skill_names()
+    offer_hidden_names = get_offer_hidden_skill_names()
 
     title = "Installed Skills"
     if enabled_only:
@@ -1028,6 +1032,7 @@ def do_list(source_filter: str = "all",
     table.add_column("Source", style="dim")
     table.add_column("Trust", style="dim")
     table.add_column("Status", style="dim")
+    table.add_column("Offer", style="dim")
 
     hub_count = 0
     builtin_count = 0
@@ -1074,9 +1079,22 @@ def do_list(source_filter: str = "all",
             disabled_count += 1
             status_cell = "[dim red]disabled[/]"
 
+        offer_cell = (
+            "[yellow]on-demand[/]"
+            if name in offer_hidden_names
+            else "[dim]default[/]"
+        )
+
         trust_style = {"builtin": "bright_cyan", "trusted": "green", "community": "yellow", "local": "dim"}.get(trust, "dim")
         trust_label = "official" if source_display == "official" else trust
-        table.add_row(name, category, source_display, f"[{trust_style}]{trust_label}[/]", status_cell)
+        table.add_row(
+            name,
+            category,
+            source_display,
+            f"[{trust_style}]{trust_label}[/]",
+            status_cell,
+            offer_cell,
+        )
 
     c.print(table)
     summary = f"[dim]{hub_count} hub-installed, {builtin_count} builtin, {local_count} local"
