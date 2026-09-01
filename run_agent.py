@@ -679,9 +679,9 @@ class AIAgent:
         if self._session_db is not None:
             return self._session_db
         try:
-            from hermes_state import SessionDB
+            from hermes_state import get_shared_session_db
 
-            self._session_db = SessionDB()
+            self._session_db = get_shared_session_db()
             # We opened it here, so nothing else holds a reference — this agent
             # is its only owner and close() must release it.
             self._owns_session_db = True
@@ -5081,7 +5081,10 @@ class AIAgent:
         try:
             if getattr(self, "_owns_session_db", False) and session_db is not None:
                 self._owns_session_db = False
-                session_db.close()
+                # Shared instances no-op on close(); release the refcount
+                # so the registry can close when the last caller is done (#90837).
+                from hermes_state import release_or_close
+                release_or_close(session_db)
         except Exception:
             pass
 
@@ -5595,6 +5598,75 @@ class AIAgent:
                 self._client_log_context(),
                 exc,
             )
+
+    def _drain_transports_after_abandonment(self, *, reason: str) -> int:
+        """FD-safe transport drain for an abandoned (timed-out) worker (#94248).
+
+        A delegation deadline abandons this agent's daemon worker while it may
+        still be blocked inside an in-flight OpenSSL ``read`` (Codex Responses
+        stream, httpx request). The timeout thread must never hard-close those
+        transports — ``client.close()`` releases raw FDs under a live SSL BIO,
+        the #29507 / #67142 / #70773 native-corruption family and the SIGSEGV
+        shape reported in #94248. This helper only ``shutdown()``s pooled
+        sockets (safe from any thread), settling blocked reads with EOF/EPIPE
+        so the worker can unwind and run the real close from its own thread.
+
+        Returns the number of sockets shut down across all transports.
+        """
+        drained = 0
+        # Shared primary client (codex-direct / MoA stream on it directly).
+        try:
+            client = getattr(self, "client", None)
+            if client is not None:
+                drained += self._force_close_tcp_sockets(client)
+        except Exception:
+            logger.debug("Abandoned-worker drain: shared client sweep failed",
+                         exc_info=True)
+        # Cached per-request wire clients: abort (shutdown + poison the reuse
+        # slot) so the unwinding worker discards them instead of re-caching.
+        try:
+            with self._openai_client_lock():
+                cache = getattr(self, "_request_client_cache", None)
+                cached = cache["client"] if cache else None
+            if cached is not None:
+                self._abort_request_openai_client(cached, reason=reason)
+        except Exception:
+            logger.debug("Abandoned-worker drain: request client abort failed",
+                         exc_info=True)
+        try:
+            with self._openai_client_lock():
+                cache = getattr(self, "_request_anthropic_client_cache", None)
+                cached = cache["client"] if cache else None
+            if cached is not None:
+                self._abort_request_anthropic_client(cached, reason=reason)
+        except Exception:
+            logger.debug("Abandoned-worker drain: anthropic client abort failed",
+                         exc_info=True)
+        # Codex app-server session watches a private interrupt event.
+        try:
+            codex_session = getattr(self, "_codex_session", None)
+            request_interrupt = getattr(codex_session, "request_interrupt", None)
+            if callable(request_interrupt):
+                request_interrupt()
+        except Exception:
+            logger.debug("Abandoned-worker drain: codex interrupt failed",
+                         exc_info=True)
+        # Inline (cron-style) request abort hook, when registered.
+        try:
+            abort_active = getattr(self, "_active_request_abort", None)
+            if callable(abort_active):
+                abort_active(reason)
+        except Exception:
+            logger.debug("Abandoned-worker drain: active request abort failed",
+                         exc_info=True)
+        logger.info(
+            "Abandoned-worker transports drained (%s, tcp_shutdown=%d, "
+            "fd_release=deferred_to_worker) %s",
+            reason,
+            drained,
+            self._client_log_context(),
+        )
+        return drained
 
     def _build_primary_client_for_active_provider(self, *, reason: str) -> Any:
         """Build the shared client shape required by the active provider.

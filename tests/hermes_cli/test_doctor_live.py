@@ -232,6 +232,57 @@ class TestBrowserAvailableNpxRung:
         assert _real_browser_available() is False
 
 
+class TestBrowserLiveProbe:
+    def _stub_browser_resolution(self, monkeypatch):
+        import tools.browser_tool as bt
+
+        monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "/bin/agent-browser")
+        monkeypatch.setattr(bt, "_agent_browser_argv", lambda _cmd: ["/bin/agent-browser"])
+        monkeypatch.setattr(bt, "_build_browser_env", lambda: {"PATH": "/bin"})
+        monkeypatch.setattr(bt, "_merge_browser_path", lambda path: path)
+
+    def test_uses_agent_browser_backend_and_always_closes(self, monkeypatch):
+        self._stub_browser_resolution(monkeypatch)
+        calls = []
+
+        def _run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"success": true}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(doctor_live.subprocess, "run", _run)
+
+        ok, detail = doctor_live._launch_browser_probe(7.0)
+
+        assert ok is True
+        assert "agent-browser" in detail
+        assert calls[0][0][-2:] == ["open", "about:blank"]
+        assert calls[1][0][-1] == "close"
+        assert calls[0][0][1:5] == calls[1][0][1:5]
+        assert calls[0][1]["timeout"] == 7.0
+
+    def test_timeout_reports_failure_and_still_closes(self, monkeypatch):
+        self._stub_browser_resolution(monkeypatch)
+        calls = []
+
+        def _run(argv, **kwargs):
+            calls.append(argv)
+            if argv[-1] != "close":
+                raise doctor_live.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(doctor_live.subprocess, "run", _run)
+
+        ok, detail = doctor_live._launch_browser_probe(3.0)
+
+        assert ok is False
+        assert "timed out after 3s" in detail
+        assert calls[-1][-1] == "close"
+
+
 class TestFailureIsolation:
     def test_one_probe_raising_does_not_stop_others(self, monkeypatch):
         monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
