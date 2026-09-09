@@ -99,7 +99,6 @@ def _launch_browser_probe(timeout: float) -> tuple:
     probe_id = f"hd{uuid.uuid4().hex[:8]}"
     common = prefix + [
         "--session", probe_id,
-        "--namespace", probe_id,
         "--json",
     ]
     env = _build_browser_env()

@@ -261,7 +261,7 @@ class TestBrowserLiveProbe:
         assert "agent-browser" in detail
         assert calls[0][0][-2:] == ["open", "about:blank"]
         assert calls[1][0][-1] == "close"
-        assert calls[0][0][1:5] == calls[1][0][1:5]
+        assert calls[0][0][:-2] == calls[1][0][:-1]
         assert calls[0][1]["timeout"] == 7.0
 
     def test_timeout_reports_failure_and_still_closes(self, monkeypatch):
