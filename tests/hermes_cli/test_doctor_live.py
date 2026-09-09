@@ -16,6 +16,7 @@ from hermes_cli.doctor_live import (
     maybe_run_live_checks,
     run_live_checks,
 )
+from tools import browser_tool_install as bt_install
 
 # Captured before the autouse fixture below stubs doctor_live._browser_available
 # to a constant, so TestBrowserAvailableNpxRung can exercise the real function.
@@ -202,20 +203,18 @@ class TestBrowserAvailableNpxRung:
 
     def test_true_when_npx_resolves_agent_browser(self, monkeypatch, tmp_path):
         self._block_path_and_node_modules_checks(monkeypatch, tmp_path)
-        import tools.browser_tool as bt
 
-        monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "npx agent-browser")
+        monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
 
         assert _real_browser_available() is True
 
     def test_false_when_nothing_resolves(self, monkeypatch, tmp_path):
         self._block_path_and_node_modules_checks(monkeypatch, tmp_path)
-        import tools.browser_tool as bt
 
         def _raise(**_kw):
             raise FileNotFoundError("agent-browser CLI not found")
 
-        monkeypatch.setattr(bt, "_find_agent_browser", _raise)
+        monkeypatch.setattr(bt_install, "_find_agent_browser", _raise)
 
         assert _real_browser_available() is False
 
@@ -224,10 +223,9 @@ class TestBrowserAvailableNpxRung:
         advertise as ready — must not diverge from dep_ensure/nous_subscription's
         same carve-out."""
         self._block_path_and_node_modules_checks(monkeypatch, tmp_path)
-        import tools.browser_tool as bt
 
-        monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "npx agent-browser")
-        monkeypatch.setattr(bt, "_requires_real_termux_browser_install", lambda cmd: True)
+        monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
+        monkeypatch.setattr("tools.browser_tool_install._requires_real_termux_browser_install", lambda cmd: True)
 
         assert _real_browser_available() is False
 
@@ -235,11 +233,13 @@ class TestBrowserAvailableNpxRung:
 class TestBrowserLiveProbe:
     def _stub_browser_resolution(self, monkeypatch):
         import tools.browser_tool as bt
+        import tools.browser_tool_install as install
+        import tools.browser_tool_session as session
 
-        monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "/bin/agent-browser")
-        monkeypatch.setattr(bt, "_agent_browser_argv", lambda _cmd: ["/bin/agent-browser"])
+        monkeypatch.setattr(install, "_find_agent_browser", lambda **_kw: "/bin/agent-browser")
+        monkeypatch.setattr(session, "_agent_browser_argv", lambda _cmd: ["/bin/agent-browser"])
         monkeypatch.setattr(bt, "_build_browser_env", lambda: {"PATH": "/bin"})
-        monkeypatch.setattr(bt, "_merge_browser_path", lambda path: path)
+        monkeypatch.setattr(install, "_merge_browser_path", lambda path: path)
 
     def test_uses_agent_browser_backend_and_always_closes(self, monkeypatch):
         self._stub_browser_resolution(monkeypatch)
