@@ -78,7 +78,8 @@ class TestConfigFilePermissions(unittest.TestCase):
     """Verify config files get secure permissions."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        # Test owned directories; macOS /var is a symlink whose permissions are preserved.
+        self.tmpdir = str(Path(tempfile.mkdtemp()).resolve())
 
     def tearDown(self):
         import shutil
