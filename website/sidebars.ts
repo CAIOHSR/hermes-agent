@@ -29,6 +29,7 @@ const sidebars: SidebarsConfig = {
         'user-guide/windows-native',
         'user-guide/windows-wsl-quickstart',
         'user-guide/configuration',
+        'user-guide/free-tier',
         'user-guide/managed-scope',
         'user-guide/configuring-models',
         {
@@ -119,6 +120,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/features/web-search',
             'user-guide/features/x-search',
             'user-guide/features/browser',
+            'user-guide/features/credential-vault',
             'user-guide/features/computer-use',
             'user-guide/features/vision',
             'user-guide/features/image-generation',
