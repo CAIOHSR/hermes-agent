@@ -357,7 +357,9 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         # 'stale' error. Gated on the per-tool capability: older drivers (`additionalProperties: false`) must never see it.
         idx = args.get("element_index")
         token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
-        if token and self._session.supports_capability("accessibility.element_tokens", tool=name):
+        # Modern drivers accept/require tokens in the input schema without the legacy capability tag.
+        if token and (self._session.supports_capability("accessibility.element_tokens", tool=name)
+                      or self._session.supports_input_property(name, "element_token")):
             args["element_token"] = token
         if inject_session:  # setdefault preserves any explicit session a caller already supplied
             args.setdefault("session", self._session_id)
