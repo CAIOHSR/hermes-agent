@@ -22,17 +22,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# boto3 is not in the [all] extras; lazy_deps installs it on demand.
-try:
-    # --------------------------------------------------------------------------- Ensure boto3/botocore are
-    # installed before any code in this module runs. Upstream removed boto3 from [all] extras (PRs #24220,
-    # #24515); lazy_deps handles on-demand installation so the Bedrock provider still works in the EKS
-    # deployment without baking boto3 into the base image.
-    # ---------------------------------------------------------------------------
-    from tools.lazy_deps import ensure
-    ensure("provider.bedrock", prompt=False)
-except Exception as exc:  # downstream imports surface the real error
-    logger.warning("boto3 lazy install did not complete: %s", exc)
+# boto3 is optional. Importing routing helpers must not mutate the install;
+# acquire the SDK only when a Bedrock request actually needs it.
 
 
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
@@ -100,11 +91,15 @@ def _require_boto3():
     try:
         import boto3
     except ImportError:
-        raise ImportError(
-            "The 'boto3' package is required for the AWS Bedrock provider. "
-            "Install it with: pip install boto3\n"
-            "Or install Hermes with Bedrock support: pip install -e '.[bedrock]'"
-        )
+        from tools.lazy_deps import ensure
+        ensure("provider.bedrock", prompt=False)
+        try:
+            import boto3
+        except ImportError as exc:
+            raise ImportError(
+                "The 'boto3' package is required for the AWS Bedrock provider. "
+                "Install it with: pip install boto3"
+            ) from exc
     try:
         version = tuple(int(x) for x in boto3.__version__.split(".")[:3])
     except (AttributeError, ValueError):
@@ -224,10 +219,11 @@ class BedrockOpenAISigV4Auth(httpx.Auth):
         self.service = service
 
     def auth_flow(self, request):  # pragma: no cover - exercised by live call
+        kwargs = scoped_aws_session_kwargs()
+        boto3 = _require_boto3()
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
-        kwargs = scoped_aws_session_kwargs()
-        credentials = _require_boto3().Session(**kwargs).get_credentials()
+        credentials = boto3.Session(**kwargs).get_credentials()
         if credentials is None:
             raise RuntimeError(
                 "No AWS credentials available for Bedrock OpenAI Responses. "
