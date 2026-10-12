@@ -777,20 +777,20 @@ def usage_report() -> list[dict[str, Any]]:
             for n in sorted({name for name, _md in _iter_skill_mds(base, local_only=False)})]
 
 
-_SKILL_IDENTITY_CACHE: Dict[
+_SKILL_IDENTITY_CACHE: dict[
     Path,
-    Tuple[
-        Tuple[Tuple[str, int, int, int, int, int], ...],
-        Dict[str, Set[Path]],
-        Dict[Path, str],
-        Tuple[Path, ...],
+    tuple[
+        tuple[tuple[str, int, int, int, int, int], ...],
+        dict[str, set[Path]],
+        dict[Path, str],
+        tuple[Path, ...],
     ],
 ] = {}
 
 
 def _identity_watch_signature(
     paths: Iterable[Path],
-) -> Tuple[Tuple[str, int, int, int, int, int], ...]:
+) -> tuple[tuple[str, int, int, int, int, int], ...]:
     """Fingerprint known skill files and the dirs that can gain children."""
     signature = []
     for path in sorted(set(paths), key=lambda item: str(item)):
@@ -810,7 +810,7 @@ def _identity_watch_signature(
     return tuple(signature)
 
 
-def _skills_root_signature(root: Path) -> Optional[Tuple[int, int, int, int]]:
+def _skills_root_signature(root: Path) -> Optional[tuple[int, int, int, int]]:
     """Return the root-only signature kept for diagnostics/backward compatibility."""
     try:
         root_stat = root.stat()
@@ -825,7 +825,7 @@ def _skills_root_signature(root: Path) -> Optional[Tuple[int, int, int, int]]:
 
 
 def _add_identity_alias(
-    aliases: Dict[str, Set[Path]], alias: str, skill_dir: Path
+    aliases: dict[str, set[Path]], alias: str, skill_dir: Path
 ) -> None:
     if alias:
         aliases.setdefault(alias, set()).add(skill_dir)
@@ -833,11 +833,11 @@ def _add_identity_alias(
 
 def _build_skill_identity_index(
     root: Path,
-) -> Tuple[Dict[str, Set[Path]], Dict[Path, str], Tuple[Path, ...]]:
+) -> tuple[dict[str, set[Path]], dict[Path, str], tuple[Path, ...]]:
     """Build aliases for local skills, preserving ambiguity as a set of paths."""
-    aliases: Dict[str, Set[Path]] = {}
-    canonical_by_dir: Dict[Path, str] = {}
-    watched_paths: Set[Path] = set()
+    aliases: dict[str, set[Path]] = {}
+    canonical_by_dir: dict[Path, str] = {}
+    watched_paths: set[Path] = set()
     try:
         from agent.skill_utils import iter_skill_index_files
 
@@ -901,7 +901,7 @@ def _build_skill_identity_index(
     return aliases, canonical_by_dir, tuple(watched_paths)
 
 
-def _skill_identity_index() -> Tuple[Dict[str, Set[Path]], Dict[Path, str]]:
+def _skill_identity_index() -> tuple[dict[str, set[Path]], dict[Path, str]]:
     """Return the cached local identity index for the active Hermes profile."""
     root = _skills_dir()
     try:
@@ -947,7 +947,7 @@ def _registered_plugin_skill(skill_name: str) -> bool:
         from hermes_cli.plugins import get_plugin_manager
 
         return get_plugin_manager().find_plugin_skill(skill_name) is not None
-    except Exception:
+    except Exception:  # health: allow BLE001 -- Optional plugin discovery must preserve telemetry when a plugin fails.
         # Plugin discovery is optional from the telemetry module's perspective.
         return False
 
@@ -973,7 +973,7 @@ def _canonicalize_skill_name(skill_name: str) -> str:
         return raw
 
     aliases, canonical_by_dir = _skill_identity_index()
-    target_dirs: Optional[Set[Path]] = None
+    target_dirs: Optional[set[Path]] = None
 
     # Trusted absolute skill directory and SKILL.md forms are resolved through
     # the path index, not by accepting arbitrary filesystem paths.
@@ -1032,9 +1032,9 @@ _RECONCILE_RECORD_FIELDS = {
 _RECONCILE_SKIP_REASONS = ("unknown", "ambiguous", "plugin")
 
 
-def _strict_json_object_pairs(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+def _strict_json_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Reject duplicate JSON keys instead of silently taking the last value."""
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
             raise ValueError("duplicate JSON key")
@@ -1047,7 +1047,7 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(value)
 
 
-def _strict_usage_bytes() -> Tuple[bytes, bool]:
+def _strict_usage_bytes() -> tuple[bytes, bool]:
     """Read the usage sidecar as bytes without following a symlink."""
     path = _usage_file()
     try:
@@ -1083,7 +1083,7 @@ def _strict_usage_bytes() -> Tuple[bytes, bool]:
                 pass
 
 
-def _strict_parse_usage(raw: bytes) -> Dict[str, Dict[str, Any]]:
+def _strict_parse_usage(raw: bytes) -> dict[str, dict[str, Any]]:
     """Parse a complete usage sidecar without lossy coercions."""
     try:
         data = json.loads(
@@ -1101,7 +1101,7 @@ def _strict_parse_usage(raw: bytes) -> Dict[str, Dict[str, Any]]:
     return data
 
 
-def _read_usage_strict_for_reconcile() -> Tuple[Dict[str, Dict[str, Any]], bool]:
+def _read_usage_strict_for_reconcile() -> tuple[dict[str, dict[str, Any]], bool]:
     """Read the sidecar without the forgiving behavior of :func:`load_usage`."""
     raw, present = _strict_usage_bytes()
     if not present:
@@ -1109,11 +1109,11 @@ def _read_usage_strict_for_reconcile() -> Tuple[Dict[str, Dict[str, Any]], bool]
     return _strict_parse_usage(raw), True
 
 
-def _reconcile_alias_target(raw_key: str) -> Tuple[str, str]:
+def _reconcile_alias_target(raw_key: str) -> tuple[str, str]:
     """Return ``(canonical_name, disposition)`` for one raw sidecar key."""
     try:
         canonical = _canonicalize_skill_name(raw_key)
-    except Exception:
+    except Exception:  # health: allow BLE001 -- Malformed discovery entries must preserve unknown event keys without exposing their values.
         # Preserve an event that cannot be classified rather than aborting the
         # whole report because one skill tree entry is malformed.
         return raw_key, "unknown"
@@ -1123,7 +1123,7 @@ def _reconcile_alias_target(raw_key: str) -> Tuple[str, str]:
             return canonical, "plugin"
 
         aliases, canonical_by_dir = _skill_identity_index()
-        target_dirs: Optional[Set[Path]] = None
+        target_dirs: Optional[set[Path]] = None
         candidate_path = Path(raw_key).expanduser()
         if candidate_path.is_absolute():
             resolved = candidate_path.resolve(strict=False)
@@ -1158,7 +1158,7 @@ def _safe_reconcile_alias(raw_key: str) -> Optional[str]:
     return raw_key[:256]
 
 
-def _reconcile_group_conflict_count(records: List[Dict[str, Any]]) -> int:
+def _reconcile_group_conflict_count(records: list[dict[str, Any]]) -> int:
     """Count groups needing review before a future mutating merge."""
     if len(records) < 2:
         return 0
@@ -1200,10 +1200,10 @@ _RECONCILE_STATE_PRIORITY = {
 
 
 def _reconcile_groups_for_data(
-    data: Dict[str, Dict[str, Any]],
-) -> Tuple[List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]], Dict[str, int]]:
+    data: dict[str, dict[str, Any]],
+) -> tuple[list[tuple[str, list[tuple[str, dict[str, Any]]]]], dict[str, int]]:
     """Classify one already-read sidecar into safe groups and skipped rows."""
-    groups_by_name: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    groups_by_name: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     skipped = {reason: 0 for reason in _RECONCILE_SKIP_REASONS}
     for raw_key, record in data.items():
         canonical, disposition = _reconcile_alias_target(raw_key)
@@ -1220,7 +1220,7 @@ def _reconcile_groups_for_data(
     return groups, skipped
 
 
-def _reconcile_validate_record(record: Dict[str, Any]) -> None:
+def _reconcile_validate_record(record: dict[str, Any]) -> None:
     """Validate known fields before any backup or write is attempted."""
     for field in _RECONCILE_COUNTER_FIELDS + (
         "patch_generation",
@@ -1266,7 +1266,7 @@ def _reconcile_values_equal(left: Any, right: Any) -> bool:
         return False
 
 
-def _usage_commit_matches(expected: Dict[str, Dict[str, Any]]) -> bool:
+def _usage_commit_matches(expected: dict[str, dict[str, Any]]) -> bool:
     """Verify whether a reportedly failed save already committed *expected*."""
     try:
         path_stat = os.lstat(_usage_file())
@@ -1281,7 +1281,7 @@ def _usage_commit_matches(expected: Dict[str, Dict[str, Any]]) -> bool:
 
 
 def _reconcile_timestamp_result(
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     field: str,
     *,
     minimum: bool = False,
@@ -1295,16 +1295,16 @@ def _reconcile_timestamp_result(
 
 def _reconcile_merge_record(
     canonical: str,
-    records: List[Dict[str, Any]],
+    records: list[dict[str, Any]],
     *,
-    bundled_names: Set[str],
-    hub_names: Set[str],
-) -> Dict[str, Any]:
+    bundled_names: set[str],
+    hub_names: set[str],
+) -> dict[str, Any]:
     """Merge one safe local identity group according to field-specific rules."""
     for record in records:
         _reconcile_validate_record(record)
 
-    merged: Dict[str, Any] = {}
+    merged: dict[str, Any] = {}
     unknown_fields = sorted(
         set().union(*(set(record) - _RECONCILE_RECORD_FIELDS for record in records))
     )
@@ -1380,10 +1380,10 @@ def _reconcile_merge_record(
 
 
 def _reconcile_plan_counts(
-    data: Dict[str, Dict[str, Any]],
-    groups: List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]],
-    skipped: Dict[str, int],
-) -> Dict[str, int]:
+    data: dict[str, dict[str, Any]],
+    groups: list[tuple[str, list[tuple[str, dict[str, Any]]]]],
+    skipped: dict[str, int],
+) -> dict[str, int]:
     aliases = sum(
         sum(1 for raw_key, _ in entries if raw_key != canonical)
         for canonical, entries in groups
@@ -1400,7 +1400,7 @@ def _reconcile_plan_counts(
     }
 
 
-def _open_private_backup_dir() -> Tuple[Path, int]:
+def _open_private_backup_dir() -> tuple[Path, int]:
     """Open ``.usage_backups`` after rejecting symlinks and wrong types."""
     skills_dir = _skills_dir()
     try:
@@ -1449,7 +1449,7 @@ def _create_usage_backup(raw: bytes) -> None:
             suffix = "" if index == 0 else f"-{index}"
             name = (
                 "usage-"
-                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-"
+                f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}-"
                 f"{secrets.token_hex(8)}{suffix}.json"
             )
             candidate = backup_dir / name
@@ -1472,7 +1472,7 @@ def _create_usage_backup(raw: bytes) -> None:
                     os.chmod(candidate, 0o600)
                 os.fsync(directory_fd)
                 return
-            except BaseException:
+            except BaseException:  # health: allow BLE001 -- Clean up partial private backups on every failure; expose only a sanitized error code.
                 if fd >= 0:
                     try:
                         os.close(fd)
@@ -1491,7 +1491,7 @@ def _create_usage_backup(raw: bytes) -> None:
             pass
 
 
-def reconcile_usage_report() -> Dict[str, Any]:
+def reconcile_usage_report() -> dict[str, Any]:
     """Build a sanitized, read-only alias reconciliation report.
 
     Only keys that resolve to one local skill directory enter ``groups``.
@@ -1500,7 +1500,7 @@ def reconcile_usage_report() -> Dict[str, Any]:
     values, extension field names, or absolute paths.
     """
     data, present = _read_usage_strict_for_reconcile()
-    groups_by_name: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    groups_by_name: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     skipped = {reason: 0 for reason in _RECONCILE_SKIP_REASONS}
 
     for raw_key, record in data.items():
@@ -1510,7 +1510,7 @@ def reconcile_usage_report() -> Dict[str, Any]:
             continue
         groups_by_name.setdefault(canonical, []).append((raw_key, record))
 
-    groups: List[Dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
     possible_conflicts = 0
     alias_count = 0
     for canonical in sorted(groups_by_name):
@@ -1522,7 +1522,7 @@ def reconcile_usage_report() -> Dict[str, Any]:
         ]
         if not noncanonical_entries:
             continue
-        safe_aliases: List[str] = []
+        safe_aliases: list[str] = []
         for raw_alias, _ in sorted(noncanonical_entries, key=lambda item: item[0]):
             safe_alias = _safe_reconcile_alias(raw_alias)
             if safe_alias is not None:
@@ -1558,7 +1558,7 @@ def reconcile_usage_report() -> Dict[str, Any]:
     }
 
 
-def reconcile_usage_apply() -> Dict[str, Any]:
+def reconcile_usage_apply() -> dict[str, Any]:
     """Apply a freshly planned, fail-closed alias reconciliation.
 
     The lock deliberately surrounds the strict byte read, planning, backup, and
@@ -1604,7 +1604,7 @@ def reconcile_usage_apply() -> Dict[str, Any]:
 
             bundled_names = _read_bundled_names()
             hub_names = _read_hub_installed_names()
-            merged_by_canonical: Dict[str, Dict[str, Any]] = {}
+            merged_by_canonical: dict[str, dict[str, Any]] = {}
             for canonical, entries in groups:
                 merged_by_canonical[canonical] = _reconcile_merge_record(
                     canonical,
@@ -1634,6 +1634,6 @@ def reconcile_usage_apply() -> Dict[str, Any]:
             }
     except UsageReconcileError:
         raise
-    except Exception:
+    except Exception:  # health: allow BLE001 -- Fail-closed mutation boundary must never reveal sidecar paths or values in CLI errors.
         # Keep the CLI boundary free of filesystem paths, values, and tracebacks.
         raise UsageReconcileError("apply_failed")

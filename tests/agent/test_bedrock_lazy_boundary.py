@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def run_isolated(code, tmp_path):
     env = dict(os.environ, HERMES_HOME=str(tmp_path), PYTHONPATH=str(ROOT), PYTHONDONTWRITEBYTECODE='1')
     result = subprocess.run([sys.executable, '-c', code], cwd=ROOT, env=env,
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
 
 

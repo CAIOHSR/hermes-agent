@@ -22,10 +22,10 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-import agent.prompt_builder as prompt_builder
-import agent.skill_commands as skill_commands
-import agent.skill_utils as skill_utils
-import tools.skills_tool as skills_tool
+from agent import prompt_builder
+from agent import skill_commands
+from agent import skill_utils
+from tools import skills_tool
 
 
 _MISSING = object()
@@ -92,8 +92,8 @@ def isolated_skills(monkeypatch, tmp_path):
     # these contract tests.
     monkeypatch.setattr(skills_tool, "SKILLS_DIR", skills_dir)
     monkeypatch.setattr(skills_tool, "_skills_dir", lambda: skills_dir)
-    monkeypatch.setattr(skill_utils, "get_external_skills_dirs", lambda: [])
-    monkeypatch.setattr(skill_utils, "get_project_skills_dirs", lambda: [])
+    monkeypatch.setattr(skill_utils, "get_external_skills_dirs", list)
+    monkeypatch.setattr(skill_utils, "get_project_skills_dirs", list)
     monkeypatch.setattr(prompt_builder, "get_skill_search_roots", lambda *a: [(skill_utils.TIER_LOCAL, skills_dir)])
 
     skills_tool._SKILLS_CACHE.clear()
@@ -302,7 +302,7 @@ def test_admin_list_keeps_installed_offer_hidden_skill_and_marks_on_demand(
 
     import hermes_cli.skills_hub as cli_hub
     import tools.skills_hub as tools_hub
-    import tools.skills_sync as skills_sync
+    from tools import skills_sync
     import tools.skills_tool as skills_tool_module
 
     _write_skill(_skills_dir, "optional/hidden", "hidden-canonical")
@@ -313,7 +313,7 @@ def test_admin_list_keeps_installed_offer_hidden_skill_and_marks_on_demand(
         "HubLockFile",
         lambda: type("Lock", (), {"list_installed": lambda self: []})(),
     )
-    monkeypatch.setattr(skills_sync, "_read_manifest", lambda: {})
+    monkeypatch.setattr(skills_sync, "_read_manifest", dict)
 
     sink = StringIO()
     console = Console(file=sink, force_terminal=False, color_system=None, width=120)

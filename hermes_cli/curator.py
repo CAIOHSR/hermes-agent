@@ -647,7 +647,7 @@ def _cmd_reconcile_usage(args) -> int:
         # print the JSON payload, exception text, or sidecar path here.
         print(f"curator: reconcile-usage: {exc.code}", file=sys.stderr)
         return 2
-    except Exception:
+    except Exception:  # health: allow BLE001 -- CLI boundary must emit only allowlisted error codes, never sidecar values or tracebacks.
         # Fail closed around discovery/parser regressions without turning a
         # user sidecar into command output.
         print("curator: reconcile-usage: report_failed", file=sys.stderr)

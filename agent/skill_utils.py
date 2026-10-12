@@ -273,7 +273,7 @@ def get_disabled_skill_names(platform: str | None = None) -> set[str]:
     return disabled - ESSENTIAL_SKILLS
 
 
-def get_offer_hidden_skill_names() -> Set[str]:
+def get_offer_hidden_skill_names() -> set[str]:
     """Return canonical skill names hidden from offer-time surfaces.
 
     ``skills.offer_hidden`` is intentionally a strict list-of-strings

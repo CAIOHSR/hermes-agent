@@ -18,7 +18,7 @@ def reconcile_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     import hermes_constants
-    import tools.skill_usage as skill_usage
+    from tools import skill_usage
 
     importlib.reload(hermes_constants)
     importlib.reload(skill_usage)
