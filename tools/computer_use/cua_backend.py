@@ -410,6 +410,7 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         # working; drivers advertising neither (`additionalProperties: false`) must never see the property.
         idx = args.get("element_index")
         token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
+        # Modern drivers may advertise token support in the input schema without the legacy capability tag.
         if token and (self._session.supports_input_property(name, "element_token")
                       or self._session.supports_capability("accessibility.element_tokens", tool=name)):
             args["element_token"] = token

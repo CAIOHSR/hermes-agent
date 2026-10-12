@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
+import stat
 import threading
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone, UTC
@@ -259,15 +261,18 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
 
 def is_agent_created(skill_name: str) -> bool:
     """Neither bundled nor hub-installed (and not only present in an external dir)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     return not (is_bundled(skill_name) or is_hub_installed(skill_name)) and (
         _find_skill_dir(skill_name) is not None or _find_external_skill_dir(skill_name) is None)
 
 
 def is_hub_installed(skill_name: str) -> bool:
+    skill_name = _canonicalize_skill_name(skill_name)
     return skill_name in _read_hub_installed_names()
 
 
 def is_bundled(skill_name: str) -> bool:
+    skill_name = _canonicalize_skill_name(skill_name)
     return skill_name in _read_bundled_names()
 
 
@@ -278,6 +283,7 @@ def _external_read_only_message(skill_name: str) -> str:
 def is_curation_eligible(skill_name: str, skill_path: Optional[Path] = None) -> bool:
     """Agent-created: yes. Bundled: only with ``curator.prune_builtins``. Hub / external-dir / protected built-ins:
     never (external owner)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if ((skill_path is not None and is_external_skill_path(skill_path)) or is_protected_builtin(skill_name)
             or is_hub_installed(skill_name)):
         return False
@@ -321,6 +327,7 @@ def unmanaged_report() -> list[dict[str, Any]]:
 def adopt_skill(skill_name: str) -> tuple[bool, str]:
     """User-declared handover: writes the ``created_by: agent`` marker (inactivity clock NOT reset). Refuses hub,
     external, bundled and protected skills. Returns (ok, message)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if not skill_name:
         return False, "no skill name given"
     if is_protected_builtin(skill_name):
@@ -381,7 +388,7 @@ def save_usage(data: dict[str, dict[str, Any]]) -> bool:
     """Write the usage map atomically; True when it committed."""
     path = _usage_file()
     try:
-        atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False), tmp_prefix=".usage_")
+        atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False), tmp_prefix=".usage_", create_mode=0o600)
         return True
     except Exception as e:
         logger.debug("Failed to write %s: %s", path, e, exc_info=True)
@@ -390,6 +397,7 @@ def save_usage(data: dict[str, dict[str, Any]]) -> bool:
 
 def get_record(skill_name: str) -> dict[str, Any]:
     """The (backfilled) record for *skill_name*; fresh defaults if missing."""
+    skill_name = _canonicalize_skill_name(skill_name)
     return _backfilled(load_usage().get(skill_name))
 
 
@@ -401,9 +409,15 @@ def _locked_update(skill_name: str, op: Callable[[dict[str, dict[str, Any]]], tu
         if guard is not None and not guard():
             return None
         with _usage_file_lock():
+            usage_file_existed = _usage_file().exists()
             data = load_usage()
             result, dirty = op(data)
-            return None if dirty and not save_usage(data) else result
+            if dirty:
+                if not save_usage(data):
+                    return None
+                if not usage_file_existed:
+                    _refresh_identity_cache_signature()
+            return result
     except Exception as e:
         logger.debug(fail_log, skill_name, e, exc_info=True)
         return None
@@ -411,6 +425,7 @@ def _locked_update(skill_name: str, op: Callable[[dict[str, dict[str, Any]]], tu
 
 def seed_record_if_missing(skill_name: str) -> None:
     """Baseline record for a curation-eligible skill so its inactivity clock starts at first sight, not epoch."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if skill_name and is_curation_eligible(skill_name):
         # load_usage() already dropped non-dict values, so "missing" == key absent; dirty only when inserted.
         def _seed(data):
@@ -433,6 +448,7 @@ def reanchor_clock(skill_name: str) -> None:
 def _mutate(skill_name: str, mutator, *, require_curation_eligible: bool = False) -> Any:
     """Load, apply *mutator(record)* in place, save; the mutator result (None if nothing landed). Telemetry is
     recorded for ANY skill; lifecycle mutators pass ``require_curation_eligible=True`` (never write onto unmanaged)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if not skill_name:
         return None
     return _locked_update(skill_name, lambda data: (mutator(data.setdefault(skill_name, _empty_record())), True),
@@ -452,6 +468,7 @@ def _bump(rec: dict[str, Any], count_key: str, ts_key: str) -> None:
 
 def telemetry_provenance(skill_name: str, record: Optional[dict[str, Any]] = None) -> str:
     """Bounded provenance label for shared skill metrics."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if is_hub_installed(skill_name) or is_bundled(skill_name):
         return "installed"
     if ":" in skill_name:
@@ -491,11 +508,13 @@ def _mutate_and_emit(skill_name: str, action: str, mutator: Callable[[dict[str, 
 
 # --- Counter bumps — telemetry for ALL skills regardless of provenance (observability only) ---
 def bump_view(skill_name: str) -> None:
+    skill_name = _canonicalize_skill_name(skill_name)
     _mutate(skill_name, lambda rec: _bump(rec, "view_count", "last_viewed_at"))
 
 
 def bump_use(skill_name: str, *, task_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
     """Skill actively used (loaded into the prompt path / referenced from an assistant turn)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     def _apply(rec: dict[str, Any]) -> dict[str, Any]:
         uses = _non_negative_int(rec.get("use_count"))
         gen = _non_negative_int(rec.get("patch_generation"))
@@ -511,6 +530,7 @@ def bump_use(skill_name: str, *, task_id: Optional[str] = None, session_id: Opti
 def bump_patch(skill_name: str, *, action: str = "patch", task_id: Optional[str] = None,
                session_id: Optional[str] = None) -> None:
     """Called from skill_manage (patch/edit)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     def _apply(rec: dict[str, Any]) -> dict[str, Any]:
         _bump(rec, "patch_count", "last_patched_at")
         rec["patch_generation"] = _non_negative_int(rec.get("patch_generation")) + 1
@@ -527,6 +547,7 @@ def record_created(skill_name: str, *, agent_created: bool, task_id: Optional[st
     ``created_by="learn"``: a learning-signal marker, NOT the curator-management opt-in (``"agent"``),
     so /journey can show user-taught skills without handing them to autonomous curation.
     """
+    skill_name = _canonicalize_skill_name(skill_name)
     def _apply(rec: dict[str, Any]) -> dict[str, Any]:
         rec.clear()
         rec.update(_empty_record(), created_by="agent" if agent_created else "learn")
@@ -536,6 +557,7 @@ def record_created(skill_name: str, *, agent_created: bool, task_id: Optional[st
 
 def record_installed(skill_name: str) -> None:
     """Record a successful Skills Hub install without exporting its name."""
+    skill_name = _canonicalize_skill_name(skill_name)
     def _apply(rec: dict[str, Any]) -> dict[str, Any]:
         rec.update(created_by="installed", state=STATE_ACTIVE, archived_at=None)
         return {"created_by": "installed"}
@@ -544,11 +566,13 @@ def record_installed(skill_name: str) -> None:
 
 def mark_agent_created(skill_name: str) -> None:
     """Opt a skill into curator management — the only thing that makes it eligible for automatic curation."""
+    skill_name = _canonicalize_skill_name(skill_name)
     _set_field(skill_name, "created_by", "agent")
 
 
 def set_state(skill_name: str, state: str) -> None:
     """Set lifecycle state (no-op if invalid / unmanageable). Emits archived/stale/restored; active<-stale is silent."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if state not in _VALID_STATES:
         logger.debug("set_state: invalid state %r for %s", state, skill_name)
         return
@@ -574,10 +598,12 @@ def set_pinned(skill_name: str, pinned: bool) -> bool:
     (skill not curation-eligible), True on success — so callers can report failure instead of a false
     success (issue #92993).
     """
+    skill_name = _canonicalize_skill_name(skill_name)
     return _set_field(skill_name, "pinned", bool(pinned))
 
 
 def forget(skill_name: str) -> None:
+    skill_name = _canonicalize_skill_name(skill_name)
     if skill_name:
         _locked_update(skill_name, lambda d: (None, d.pop(skill_name, None) is not None), "skill_usage.forget(%s) failed: %s")
 
@@ -617,6 +643,7 @@ def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwa
 def archive_skill(skill_name: str) -> tuple[bool, str]:
     """Move a curator-eligible skill dir to ``.archive/`` (flattened; timestamp suffix on collision). Never hub;
     bundled built-ins only with ``curator.prune_builtins`` (and then suppressed from re-seeding)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     skill_dir = _find_skill_dir(skill_name)
     if skill_dir is None and _find_external_skill_dir(skill_name) is not None:
         return False, _external_read_only_message(skill_name)
@@ -647,6 +674,7 @@ def archive_skill(skill_name: str) -> tuple[bool, str]:
 def restore_skill(skill_name: str) -> tuple[bool, str]:
     """Move an archived skill back to the flat layout (nesting NOT reconstructed). Refuses a name now colliding with
     a hub skill, or a bundled built-in unless ``curator.prune_builtins`` is on (restoring lifts a prune)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     if is_hub_installed(skill_name):
         return False, f"skill '{skill_name}' is now hub-installed; restore would shadow the upstream version"
     if is_bundled(skill_name) and not _prune_builtins_enabled():
@@ -733,6 +761,7 @@ def provenance(skill_name: str) -> str:
     agent-authored AND local hand-made skills — the ones the user may edit/delete from the UI
     (external skills stay foreground-editable in place by design, commit 8c8fc6c1ec; the label
     split is about origin, not mutability)."""
+    skill_name = _canonicalize_skill_name(skill_name)
     return ("hub" if is_hub_installed(skill_name)
             else "bundled" if is_bundled(skill_name)
             else "external" if is_external_only(skill_name)
@@ -746,3 +775,865 @@ def usage_report() -> list[dict[str, Any]]:
     data = load_usage()
     return [_report_row(n, data.get(n), provenance=provenance(n), _persisted=n in data)
             for n in sorted({name for name, _md in _iter_skill_mds(base, local_only=False)})]
+
+
+_SKILL_IDENTITY_CACHE: Dict[
+    Path,
+    Tuple[
+        Tuple[Tuple[str, int, int, int, int, int], ...],
+        Dict[str, Set[Path]],
+        Dict[Path, str],
+        Tuple[Path, ...],
+    ],
+] = {}
+
+
+def _identity_watch_signature(
+    paths: Iterable[Path],
+) -> Tuple[Tuple[str, int, int, int, int, int], ...]:
+    """Fingerprint known skill files and the dirs that can gain children."""
+    signature = []
+    for path in sorted(set(paths), key=lambda item: str(item)):
+        try:
+            path_stat = os.stat(path, follow_symlinks=False)
+            row = (
+                str(path),
+                path_stat.st_dev,
+                path_stat.st_ino,
+                path_stat.st_mtime_ns,
+                path_stat.st_ctime_ns,
+                path_stat.st_size,
+            )
+        except OSError:
+            row = (str(path), -1, -1, -1, -1, -1)
+        signature.append(row)
+    return tuple(signature)
+
+
+def _skills_root_signature(root: Path) -> Optional[Tuple[int, int, int, int]]:
+    """Return the root-only signature kept for diagnostics/backward compatibility."""
+    try:
+        root_stat = root.stat()
+    except OSError:
+        return None
+    return (
+        root_stat.st_dev,
+        root_stat.st_ino,
+        root_stat.st_mtime_ns,
+        root_stat.st_ctime_ns,
+    )
+
+
+def _add_identity_alias(
+    aliases: Dict[str, Set[Path]], alias: str, skill_dir: Path
+) -> None:
+    if alias:
+        aliases.setdefault(alias, set()).add(skill_dir)
+
+
+def _build_skill_identity_index(
+    root: Path,
+) -> Tuple[Dict[str, Set[Path]], Dict[Path, str], Tuple[Path, ...]]:
+    """Build aliases for local skills, preserving ambiguity as a set of paths."""
+    aliases: Dict[str, Set[Path]] = {}
+    canonical_by_dir: Dict[Path, str] = {}
+    watched_paths: Set[Path] = set()
+    try:
+        from agent.skill_utils import iter_skill_index_files
+
+        resolved_root = root.resolve()
+        watched_paths.add(resolved_root)
+        # Preserve empty category directories in the watch set. This walk runs
+        # only while rebuilding an already-invalidated index; stable cache hits
+        # perform stat calls over watched paths and never recurse the tree.
+        for directory, child_dirs, _ in os.walk(resolved_root, followlinks=False):
+            child_dirs[:] = [name for name in child_dirs if not name.startswith(".")]
+            watched_paths.add(Path(directory))
+        for skill_md in iter_skill_index_files(root, "SKILL.md"):
+            try:
+                resolved_md = skill_md.resolve()
+                resolved_md.relative_to(resolved_root)
+                skill_dir = resolved_md.parent
+            except (OSError, RuntimeError, ValueError):
+                # Absolute paths are trusted only when they resolve inside the
+                # active profile's skills root. This also rejects symlink escapes.
+                continue
+            if is_excluded_skill_path(skill_md) or is_external_skill_path(skill_md):
+                continue
+
+            watched_paths.add(resolved_md)
+            parent = skill_dir
+            while True:
+                watched_paths.add(parent)
+                if parent == resolved_root or resolved_root not in parent.parents:
+                    break
+                parent = parent.parent
+
+            canonical = _read_skill_name(skill_md, fallback=skill_dir.name)
+            if not canonical:
+                continue
+            canonical_by_dir[skill_dir] = canonical
+
+            # The frontmatter name and on-disk directory basename are both
+            # accepted bare aliases. The relative directory path is also a
+            # trusted alias (e.g. ``research/directory-alias``).
+            _add_identity_alias(aliases, canonical, skill_dir)
+            _add_identity_alias(aliases, skill_dir.name, skill_dir)
+            try:
+                relative_dir = skill_dir.relative_to(resolved_root)
+            except ValueError:
+                continue
+            relative_alias = relative_dir.as_posix()
+            _add_identity_alias(aliases, relative_alias, skill_dir)
+
+            # Categorized callers use either category/name or category:name.
+            # Accept the canonical frontmatter name as well as the directory
+            # alias in both forms; only a unique path may canonicalize.
+            if len(relative_dir.parts) >= 2:
+                category = "/".join(relative_dir.parts[:-1])
+                for name in (canonical, skill_dir.name):
+                    _add_identity_alias(aliases, f"{category}/{name}", skill_dir)
+                    _add_identity_alias(aliases, f"{category}:{name}", skill_dir)
+    except Exception as e:
+        # Telemetry must never make a skill operation fail because discovery is
+        # unavailable or a malformed skill tree was encountered.
+        logger.debug("Failed to build skill identity index: %s", e, exc_info=True)
+    return aliases, canonical_by_dir, tuple(watched_paths)
+
+
+def _skill_identity_index() -> Tuple[Dict[str, Set[Path]], Dict[Path, str]]:
+    """Return the cached local identity index for the active Hermes profile."""
+    root = _skills_dir()
+    try:
+        cache_root = root.expanduser().resolve()
+    except (OSError, RuntimeError):
+        cache_root = root.expanduser()
+    cached = _SKILL_IDENTITY_CACHE.get(cache_root)
+    if cached is not None and cached[0] == _identity_watch_signature(cached[3]):
+        return cached[1], cached[2]
+
+    aliases, canonical_by_dir, watched_paths = _build_skill_identity_index(root)
+    _SKILL_IDENTITY_CACHE[cache_root] = (
+        _identity_watch_signature(watched_paths),
+        aliases,
+        canonical_by_dir,
+        watched_paths,
+    )
+    return aliases, canonical_by_dir
+
+
+def _refresh_identity_cache_signature() -> None:
+    """Account for the first sidecar creation without rescanning skills."""
+    root = _skills_dir()
+    try:
+        cache_root = root.expanduser().resolve()
+    except (OSError, RuntimeError):
+        cache_root = root.expanduser()
+    cached = _SKILL_IDENTITY_CACHE.get(cache_root)
+    if cached is not None:
+        _SKILL_IDENTITY_CACHE[cache_root] = (
+            _identity_watch_signature(cached[3]),
+            cached[1],
+            cached[2],
+            cached[3],
+        )
+
+
+def _registered_plugin_skill(skill_name: str) -> bool:
+    """Whether a qualified key belongs to a registered plugin skill."""
+    if ":" not in skill_name:
+        return False
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        return get_plugin_manager().find_plugin_skill(skill_name) is not None
+    except Exception:
+        # Plugin discovery is optional from the telemetry module's perspective.
+        return False
+
+
+def _canonicalize_skill_name(skill_name: str) -> str:
+    """Resolve a local skill alias to its unique frontmatter ``name``.
+
+    This is intentionally fail-safe: plugin-qualified names, unknown aliases,
+    ambiguous aliases, and paths outside the active local skills root are
+    returned byte-for-byte unchanged so an event is never lost or attributed
+    to the wrong skill.
+    """
+    if not skill_name:
+        return skill_name
+    raw = os.fspath(skill_name) if isinstance(skill_name, os.PathLike) else str(skill_name)
+    if not raw:
+        return raw
+
+    # A registered plugin skill always owns its qualified namespace. Do this
+    # before local category matching so a local ``plugin/skill`` directory can
+    # never collapse ``plugin:skill`` into a local record.
+    if _registered_plugin_skill(raw):
+        return raw
+
+    aliases, canonical_by_dir = _skill_identity_index()
+    target_dirs: Optional[Set[Path]] = None
+
+    # Trusted absolute skill directory and SKILL.md forms are resolved through
+    # the path index, not by accepting arbitrary filesystem paths.
+    try:
+        candidate_path = Path(raw).expanduser()
+        if candidate_path.is_absolute():
+            resolved = candidate_path.resolve(strict=False)
+            if resolved.name == "SKILL.md":
+                resolved = resolved.parent
+            if resolved in canonical_by_dir:
+                target_dirs = {resolved}
+    except (OSError, RuntimeError, TypeError, ValueError):
+        target_dirs = None
+
+    if target_dirs is None:
+        target_dirs = aliases.get(raw)
+
+    # A path can have several matching skill directories (same directory alias
+    # or duplicate frontmatter names). Refuse to guess and retain the event key.
+    if target_dirs is None or len(target_dirs) != 1:
+        return raw
+    canonical = canonical_by_dir.get(next(iter(target_dirs)), raw)
+    # Exact paths disambiguate loading, but a shared canonical name does not
+    # disambiguate telemetry. Keep the path so distinct skills never collapse.
+    return canonical if len(aliases.get(canonical, ())) == 1 else raw
+
+
+class UsageReconcileError(ValueError):
+    """A controlled, user-safe error while inspecting the usage sidecar."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        # Do not retain the underlying exception or path: callers may safely
+        # render this exception at a CLI boundary without leaking sidecar data.
+        super().__init__(code)
+
+
+_RECONCILE_RECORD_FIELDS = {
+    "created_by",
+    "use_count",
+    "view_count",
+    "last_used_at",
+    "last_viewed_at",
+    "patch_count",
+    "patch_generation",
+    "last_reused_patch_generation",
+    "last_patched_at",
+    "created_at",
+    "state",
+    "pinned",
+    "archived_at",
+    "sync",
+}
+
+
+_RECONCILE_SKIP_REASONS = ("unknown", "ambiguous", "plugin")
+
+
+def _strict_json_object_pairs(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Reject duplicate JSON keys instead of silently taking the last value."""
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    """Reject NaN/Infinity, which are not valid JSON sidecar values."""
+    raise ValueError(value)
+
+
+def _strict_usage_bytes() -> Tuple[bytes, bool]:
+    """Read the usage sidecar as bytes without following a symlink."""
+    path = _usage_file()
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
+        return b"", False
+    except OSError:
+        raise UsageReconcileError("usage_sidecar_unreadable")
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise UsageReconcileError("usage_sidecar_type")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except (OSError, ValueError):
+        raise UsageReconcileError("usage_sidecar_unreadable")
+    try:
+        opened_stat = os.fstat(fd)
+        if stat.S_ISLNK(opened_stat.st_mode) or not stat.S_ISREG(opened_stat.st_mode):
+            raise UsageReconcileError("usage_sidecar_type")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return handle.read(), True
+    except UsageReconcileError:
+        raise
+    except (OSError, ValueError):
+        raise UsageReconcileError("usage_sidecar_unreadable")
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _strict_parse_usage(raw: bytes) -> Dict[str, Dict[str, Any]]:
+    """Parse a complete usage sidecar without lossy coercions."""
+    try:
+        data = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_strict_json_object_pairs,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, ValueError, TypeError):
+        raise UsageReconcileError("invalid_usage_sidecar")
+    if not isinstance(data, dict):
+        raise UsageReconcileError("usage_sidecar_not_dict")
+    for record in data.values():
+        if not isinstance(record, dict):
+            raise UsageReconcileError("usage_record_not_dict")
+    return data
+
+
+def _read_usage_strict_for_reconcile() -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    """Read the sidecar without the forgiving behavior of :func:`load_usage`."""
+    raw, present = _strict_usage_bytes()
+    if not present:
+        return {}, False
+    return _strict_parse_usage(raw), True
+
+
+def _reconcile_alias_target(raw_key: str) -> Tuple[str, str]:
+    """Return ``(canonical_name, disposition)`` for one raw sidecar key."""
+    try:
+        canonical = _canonicalize_skill_name(raw_key)
+    except Exception:
+        # Preserve an event that cannot be classified rather than aborting the
+        # whole report because one skill tree entry is malformed.
+        return raw_key, "unknown"
+
+    try:
+        if _registered_plugin_skill(raw_key):
+            return canonical, "plugin"
+
+        aliases, canonical_by_dir = _skill_identity_index()
+        target_dirs: Optional[Set[Path]] = None
+        candidate_path = Path(raw_key).expanduser()
+        if candidate_path.is_absolute():
+            resolved = candidate_path.resolve(strict=False)
+            if resolved.name == "SKILL.md":
+                resolved = resolved.parent
+            if resolved in canonical_by_dir:
+                target_dirs = {resolved}
+        if target_dirs is None:
+            target_dirs = aliases.get(raw_key)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return raw_key, "unknown"
+
+    if target_dirs is None:
+        return raw_key, "unknown"
+    if len(target_dirs) != 1:
+        return raw_key, "ambiguous"
+    target_name = canonical_by_dir.get(next(iter(target_dirs)))
+    if len(aliases.get(target_name, ())) != 1:
+        return raw_key, "ambiguous"
+    return canonical, "local"
+
+
+def _safe_reconcile_alias(raw_key: str) -> Optional[str]:
+    """Return a non-sensitive alias suitable for report metadata."""
+    try:
+        if Path(raw_key).expanduser().is_absolute():
+            return None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if not raw_key or "\n" in raw_key or "\r" in raw_key:
+        return None
+    return raw_key[:256]
+
+
+def _reconcile_group_conflict_count(records: List[Dict[str, Any]]) -> int:
+    """Count groups needing review before a future mutating merge."""
+    if len(records) < 2:
+        return 0
+    unknown_fields = set().union(
+        *(set(record) - _RECONCILE_RECORD_FIELDS for record in records)
+    )
+    for field in unknown_fields:
+        values = [record[field] for record in records if field in record]
+        if any(not _reconcile_values_equal(values[0], value) for value in values[1:]):
+            return 1
+    return 0
+
+
+_RECONCILE_COUNTER_FIELDS = ("use_count", "view_count", "patch_count")
+
+
+_RECONCILE_ACTIVITY_FIELDS = (
+    "last_used_at",
+    "last_viewed_at",
+    "last_patched_at",
+)
+
+
+_RECONCILE_BOOL_FIELDS = ("pinned", "sync")
+
+
+_RECONCILE_TIMESTAMP_FIELDS = (
+    "created_at",
+    *_RECONCILE_ACTIVITY_FIELDS,
+    "archived_at",
+)
+
+
+_RECONCILE_STATE_PRIORITY = {
+    STATE_ARCHIVED: 0,
+    STATE_STALE: 1,
+    STATE_ACTIVE: 2,
+}
+
+
+def _reconcile_groups_for_data(
+    data: Dict[str, Dict[str, Any]],
+) -> Tuple[List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]], Dict[str, int]]:
+    """Classify one already-read sidecar into safe groups and skipped rows."""
+    groups_by_name: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    skipped = {reason: 0 for reason in _RECONCILE_SKIP_REASONS}
+    for raw_key, record in data.items():
+        canonical, disposition = _reconcile_alias_target(raw_key)
+        if disposition != "local":
+            skipped[disposition] += 1
+            continue
+        groups_by_name.setdefault(canonical, []).append((raw_key, record))
+
+    groups = []
+    for canonical in sorted(groups_by_name):
+        entries = groups_by_name[canonical]
+        if any(raw_key != canonical for raw_key, _ in entries):
+            groups.append((canonical, entries))
+    return groups, skipped
+
+
+def _reconcile_validate_record(record: Dict[str, Any]) -> None:
+    """Validate known fields before any backup or write is attempted."""
+    for field in _RECONCILE_COUNTER_FIELDS + (
+        "patch_generation",
+        "last_reused_patch_generation",
+    ):
+        if field not in record:
+            continue
+        value = record[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise UsageReconcileError("invalid_known_field")
+
+    for field in _RECONCILE_BOOL_FIELDS:
+        if field in record and not isinstance(record[field], bool):
+            raise UsageReconcileError("invalid_known_field")
+
+    if "state" in record and record["state"] not in _VALID_STATES:
+        raise UsageReconcileError("invalid_known_field")
+
+    if "created_by" in record:
+        value = record["created_by"]
+        if value is not None and not isinstance(value, str):
+            raise UsageReconcileError("invalid_known_field")
+
+    for field in _RECONCILE_TIMESTAMP_FIELDS:
+        if field not in record:
+            continue
+        value = record[field]
+        if value is None and field in _RECONCILE_ACTIVITY_FIELDS + ("archived_at",):
+            continue
+        if not isinstance(value, str) or _parse_iso_timestamp(value) is None:
+            raise UsageReconcileError("invalid_known_timestamp")
+
+
+def _reconcile_values_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values strictly, preserving numeric JSON representation."""
+    try:
+        return json.dumps(
+            left, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ) == json.dumps(
+            right, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _usage_commit_matches(expected: Dict[str, Dict[str, Any]]) -> bool:
+    """Verify whether a reportedly failed save already committed *expected*."""
+    try:
+        path_stat = os.lstat(_usage_file())
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+            return False
+        if os.name != "nt" and stat.S_IMODE(path_stat.st_mode) != 0o600:
+            return False
+        raw, present = _strict_usage_bytes()
+        return present and _reconcile_values_equal(_strict_parse_usage(raw), expected)
+    except (OSError, UsageReconcileError):
+        return False
+
+
+def _reconcile_timestamp_result(
+    records: List[Dict[str, Any]],
+    field: str,
+    *,
+    minimum: bool = False,
+) -> Optional[str]:
+    values = [record[field] for record in records if field in record]
+    valid = [(dt, str(raw)) for raw in values if (dt := _parse_iso_timestamp(raw)) is not None]
+    if not valid:
+        return None
+    return (min if minimum else max)(valid, key=lambda item: item[0])[1]
+
+
+def _reconcile_merge_record(
+    canonical: str,
+    records: List[Dict[str, Any]],
+    *,
+    bundled_names: Set[str],
+    hub_names: Set[str],
+) -> Dict[str, Any]:
+    """Merge one safe local identity group according to field-specific rules."""
+    for record in records:
+        _reconcile_validate_record(record)
+
+    merged: Dict[str, Any] = {}
+    unknown_fields = sorted(
+        set().union(*(set(record) - _RECONCILE_RECORD_FIELDS for record in records))
+    )
+    for field in unknown_fields:
+        values = [record[field] for record in records if field in record]
+        if any(not _reconcile_values_equal(values[0], value) for value in values[1:]):
+            raise UsageReconcileError("conflicting_unknown_fields")
+        # JSON values are immutable for this operation; save_usage serializes a
+        # fresh representation, so retaining this value cannot mutate the read.
+        merged[field] = values[0]
+
+    for field in _RECONCILE_COUNTER_FIELDS:
+        if any(field in record for record in records):
+            merged[field] = sum(record.get(field, 0) for record in records)
+
+    if any("created_at" in record for record in records):
+        merged["created_at"] = _reconcile_timestamp_result(
+            records, "created_at", minimum=True
+        )
+
+    for field in _RECONCILE_ACTIVITY_FIELDS:
+        if any(field in record for record in records):
+            merged[field] = _reconcile_timestamp_result(records, field)
+
+    if any("patch_generation" in record for record in records):
+        merged["patch_generation"] = max(
+            record.get("patch_generation", 0) for record in records
+        )
+    if any("last_reused_patch_generation" in record for record in records):
+        merged["last_reused_patch_generation"] = min(
+            max(record.get("last_reused_patch_generation", 0) for record in records),
+            merged.get("patch_generation", 0),
+        )
+
+    created_by_values = [
+        record["created_by"] for record in records if "created_by" in record
+    ]
+    if canonical in bundled_names or canonical in hub_names:
+        merged["created_by"] = "installed"
+    elif any(value == "agent" for value in created_by_values):
+        merged["created_by"] = "agent"
+    elif any(value == "installed" for value in created_by_values):
+        merged["created_by"] = "installed"
+    elif created_by_values:
+        first = created_by_values[0]
+        if any(not _reconcile_values_equal(first, value) for value in created_by_values[1:]):
+            raise UsageReconcileError("conflicting_created_by")
+        merged["created_by"] = first
+
+    if any("pinned" in record for record in records):
+        merged["pinned"] = any(record.get("pinned", False) for record in records)
+
+    if any("state" in record for record in records):
+        merged_state = max(
+            (record.get("state", STATE_ACTIVE) for record in records),
+            key=lambda state: _RECONCILE_STATE_PRIORITY[state],
+        )
+        merged["state"] = merged_state
+    else:
+        merged_state = STATE_ACTIVE
+
+    if any("archived_at" in record for record in records) or merged_state == STATE_ARCHIVED:
+        merged["archived_at"] = (
+            _reconcile_timestamp_result(records, "archived_at")
+            if merged_state == STATE_ARCHIVED
+            else None
+        )
+
+    if any("sync" in record for record in records):
+        merged["sync"] = any(record.get("sync", False) for record in records)
+
+    return merged
+
+
+def _reconcile_plan_counts(
+    data: Dict[str, Dict[str, Any]],
+    groups: List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]],
+    skipped: Dict[str, int],
+) -> Dict[str, int]:
+    aliases = sum(
+        sum(1 for raw_key, _ in entries if raw_key != canonical)
+        for canonical, entries in groups
+    )
+    return {
+        "records": len(data),
+        "groups": len(groups),
+        "aliases": aliases,
+        "possible_conflicts": sum(
+            _reconcile_group_conflict_count([record for _, record in entries])
+            for _, entries in groups
+        ),
+        "skipped": sum(skipped.values()),
+    }
+
+
+def _open_private_backup_dir() -> Tuple[Path, int]:
+    """Open ``.usage_backups`` after rejecting symlinks and wrong types."""
+    skills_dir = _skills_dir()
+    try:
+        skills_stat = os.lstat(skills_dir)
+    except OSError:
+        raise UsageReconcileError("backup_directory_unavailable")
+    if stat.S_ISLNK(skills_stat.st_mode) or not stat.S_ISDIR(skills_stat.st_mode):
+        raise UsageReconcileError("backup_directory_type")
+
+    backup_dir = skills_dir / ".usage_backups"
+    try:
+        os.mkdir(backup_dir, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        raise UsageReconcileError("backup_directory_unavailable")
+
+    try:
+        backup_stat = os.lstat(backup_dir)
+    except OSError:
+        raise UsageReconcileError("backup_directory_unavailable")
+    if stat.S_ISLNK(backup_stat.st_mode) or not stat.S_ISDIR(backup_stat.st_mode):
+        raise UsageReconcileError("backup_directory_type")
+    try:
+        os.chmod(backup_dir, 0o700, follow_symlinks=False)
+    except (NotImplementedError, TypeError):  # pragma: no cover - Windows
+        os.chmod(backup_dir, 0o700)
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(backup_dir, flags)
+        opened_stat = os.fstat(fd)
+    except (OSError, ValueError):
+        raise UsageReconcileError("backup_directory_unavailable")
+    if stat.S_ISLNK(opened_stat.st_mode) or not stat.S_ISDIR(opened_stat.st_mode):
+        os.close(fd)
+        raise UsageReconcileError("backup_directory_type")
+    return backup_dir, fd
+
+
+def _create_usage_backup(raw: bytes) -> None:
+    """Create a collision-safe, byte-identical private sidecar backup."""
+    backup_dir, directory_fd = _open_private_backup_dir()
+    try:
+        for index in range(128):
+            suffix = "" if index == 0 else f"-{index}"
+            name = (
+                "usage-"
+                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}-"
+                f"{secrets.token_hex(8)}{suffix}.json"
+            )
+            candidate = backup_dir / name
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            try:
+                fd = os.open(candidate, flags, 0o600)
+            except FileExistsError:
+                continue
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                try:
+                    os.chmod(candidate, 0o600, follow_symlinks=False)
+                except (NotImplementedError, TypeError):  # pragma: no cover - Windows
+                    os.chmod(candidate, 0o600)
+                os.fsync(directory_fd)
+                return
+            except BaseException:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                raise UsageReconcileError("backup_failed")
+        raise UsageReconcileError("backup_collision")
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
+
+
+def reconcile_usage_report() -> Dict[str, Any]:
+    """Build a sanitized, read-only alias reconciliation report.
+
+    Only keys that resolve to one local skill directory enter ``groups``.
+    Unknown, ambiguous, and registered-plugin keys remain untouched and are
+    represented only by disposition counts. The report contains no record
+    values, extension field names, or absolute paths.
+    """
+    data, present = _read_usage_strict_for_reconcile()
+    groups_by_name: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
+    skipped = {reason: 0 for reason in _RECONCILE_SKIP_REASONS}
+
+    for raw_key, record in data.items():
+        canonical, disposition = _reconcile_alias_target(raw_key)
+        if disposition != "local":
+            skipped[disposition] += 1
+            continue
+        groups_by_name.setdefault(canonical, []).append((raw_key, record))
+
+    groups: List[Dict[str, Any]] = []
+    possible_conflicts = 0
+    alias_count = 0
+    for canonical in sorted(groups_by_name):
+        entries = groups_by_name[canonical]
+        noncanonical_entries = [
+            (raw_alias, record)
+            for raw_alias, record in entries
+            if raw_alias != canonical
+        ]
+        if not noncanonical_entries:
+            continue
+        safe_aliases: List[str] = []
+        for raw_alias, _ in sorted(noncanonical_entries, key=lambda item: item[0]):
+            safe_alias = _safe_reconcile_alias(raw_alias)
+            if safe_alias is not None:
+                safe_aliases.append(safe_alias)
+        conflict = _reconcile_group_conflict_count([record for _, record in entries])
+        possible_conflicts += conflict
+        alias_count += len(noncanonical_entries)
+        groups.append(
+            {
+                "canonical": canonical,
+                "aliases": safe_aliases,
+                "record_count": len(entries),
+                "possible_conflicts": conflict,
+            }
+        )
+
+    skipped_total = sum(skipped.values())
+    counts = {
+        "records": len(data),
+        "groups": len(groups),
+        "aliases": alias_count,
+        "possible_conflicts": possible_conflicts,
+        "skipped": skipped_total,
+    }
+    return {
+        "status": "clean" if not data else "ok",
+        "dry_run": True,
+        "source_present": present,
+        "counts": counts,
+        "groups": groups,
+        "skipped": skipped,
+        "possible_conflicts": possible_conflicts,
+    }
+
+
+def reconcile_usage_apply() -> Dict[str, Any]:
+    """Apply a freshly planned, fail-closed alias reconciliation.
+
+    The lock deliberately surrounds the strict byte read, planning, backup, and
+    save.  A report made before this function is only advisory; the apply path
+    always re-reads and re-plans the current sidecar before creating a backup.
+    """
+    try:
+        with _usage_file_lock():
+            raw, present = _strict_usage_bytes()
+            if not present:
+                return {
+                    "status": "clean",
+                    "dry_run": False,
+                    "source_present": False,
+                    "counts": {
+                        "records": 0,
+                        "groups": 0,
+                        "aliases": 0,
+                        "possible_conflicts": 0,
+                        "skipped": 0,
+                    },
+                    "skipped": {reason: 0 for reason in _RECONCILE_SKIP_REASONS},
+                }
+
+            data = _strict_parse_usage(raw)
+            # Validate skipped records too.  An apply must never silently carry
+            # a malformed known field forward while mutating another group.
+            for record in data.values():
+                _reconcile_validate_record(record)
+
+            groups, skipped = _reconcile_groups_for_data(data)
+            counts = _reconcile_plan_counts(data, groups, skipped)
+            if not groups:
+                # Unknown/ambiguous/plugin records are intentionally preserved;
+                # with no safe alias there is no mutation and no backup.
+                return {
+                    "status": "clean",
+                    "dry_run": False,
+                    "source_present": True,
+                    "counts": counts,
+                    "skipped": skipped,
+                }
+
+            bundled_names = _read_bundled_names()
+            hub_names = _read_hub_installed_names()
+            merged_by_canonical: Dict[str, Dict[str, Any]] = {}
+            for canonical, entries in groups:
+                merged_by_canonical[canonical] = _reconcile_merge_record(
+                    canonical,
+                    [record for _, record in entries],
+                    bundled_names=bundled_names,
+                    hub_names=hub_names,
+                )
+
+            replanned = dict(data)
+            for canonical, entries in groups:
+                for raw_key, _ in entries:
+                    if raw_key != canonical:
+                        replanned.pop(raw_key, None)
+                replanned[canonical] = merged_by_canonical[canonical]
+
+            # The backup is the exact byte sequence that was parsed and is made
+            # only after every group has passed validation/conflict checks.
+            _create_usage_backup(raw)
+            if not save_usage(replanned) and not _usage_commit_matches(replanned):
+                raise UsageReconcileError("save_failed")
+            return {
+                "status": "applied",
+                "dry_run": False,
+                "source_present": True,
+                "counts": counts,
+                "skipped": skipped,
+            }
+    except UsageReconcileError:
+        raise
+    except Exception:
+        # Keep the CLI boundary free of filesystem paths, values, and tracebacks.
+        raise UsageReconcileError("apply_failed")

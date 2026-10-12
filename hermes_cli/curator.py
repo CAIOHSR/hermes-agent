@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import unicodedata
 from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Optional
@@ -618,7 +619,81 @@ _YES = _arg("-y", "--yes", action="store_true", help="Skip the confirmation prom
 _STORE_TRUE = dict(action="store_true")
 
 # argparse wiring: (name, help, handler, *(flags, add_argument kwargs))
+def _safe_reconcile_display_name(name: str) -> Optional[str]:
+    """Allow only a bounded canonical skill name in CLI output."""
+    try:
+        if Path(name).expanduser().is_absolute():
+            return None
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if not name or any(unicodedata.category(char).startswith("C") for char in name):
+        return None
+    return name[:128]
+
+
+def _cmd_reconcile_usage(args) -> int:
+    """Report or explicitly apply local usage alias reconciliation."""
+    from tools import skill_usage
+
+    apply = bool(getattr(args, "apply", False))
+    try:
+        report = (
+            skill_usage.reconcile_usage_apply()
+            if apply
+            else skill_usage.reconcile_usage_report()
+        )
+    except skill_usage.UsageReconcileError as exc:
+        # The exception deliberately carries only an allowlisted code. Never
+        # print the JSON payload, exception text, or sidecar path here.
+        print(f"curator: reconcile-usage: {exc.code}", file=sys.stderr)
+        return 2
+    except Exception:
+        # Fail closed around discovery/parser regressions without turning a
+        # user sidecar into command output.
+        print("curator: reconcile-usage: report_failed", file=sys.stderr)
+        return 2
+
+    counts = report["counts"]
+    if apply:
+        if report["status"] == "clean":
+            print("curator: reconcile-usage clean (no changes)")
+        else:
+            print("curator: reconcile-usage applied")
+        print(f"  records:            {counts['records']}")
+        print(f"  canonical groups:   {counts['groups']}")
+        print(f"  aliases removed:    {counts['aliases']}")
+        print(f"  skipped:            {counts['skipped']}")
+        return 0
+
+    if report["status"] == "clean":
+        print("curator: reconcile-usage clean (no usage records)")
+        return 0
+
+    print("curator: reconcile-usage report (dry-run; no changes)")
+    print(f"  records:            {counts['records']}")
+    print(f"  canonical groups:   {counts['groups']}")
+    print(f"  aliases:            {counts['aliases']}")
+    print(f"  possible conflicts: {counts['possible_conflicts']}")
+    skipped = report["skipped"]
+    print(
+        "  skipped:            "
+        f"{counts['skipped']} (unknown={skipped['unknown']} "
+        f"ambiguous={skipped['ambiguous']} plugin={skipped['plugin']})"
+    )
+
+    names = []
+    for group in report["groups"]:
+        display_name = _safe_reconcile_display_name(group["canonical"])
+        if display_name is not None:
+            names.append(display_name)
+    if names:
+        print("  canonical names:    " + ", ".join(names))
+    return 0
+
+
 _SUBCOMMANDS = (
+    ("reconcile-usage", "Report local skill-usage aliases", _cmd_reconcile_usage,
+     _arg("--apply", **_STORE_TRUE, help="Apply atomically; report-only by default")),
     ("status", "Show curator status and skill stats", _cmd_status),
     (
         "usage", "Show usage telemetry for ALL skills (built-in, hub, agent) with provenance",

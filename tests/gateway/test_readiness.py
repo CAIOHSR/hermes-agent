@@ -9,6 +9,8 @@ from gateway.readiness import collect_runtime_readiness
 
 
 def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monkeypatch):
+    # Host disk pressure is a separate probe, not a fixture of healthy runtime.
+    monkeypatch.setattr("gateway.readiness._probe_disk", lambda home: {"status": "ok"})
     home = tmp_path / ".hermes"
     home.mkdir()
     (home / "config.yaml").write_text(
@@ -93,3 +95,11 @@ def test_readiness_uses_running_session_store_state_over_independent_probe(
     assert recovered["checks"]["session_store"] == {"status": "ok"}
 
 
+
+
+def test_disk_pressure_keeps_readiness_degraded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("gateway.readiness._probe_disk", lambda home: {"status": "degraded", "used_percent": 92.0})
+    result = collect_runtime_readiness(configured_model="test/model", runtime_status={"gateway_state": "running"})
+    assert result["status"] == "degraded"
+    assert result["checks"]["disk"]["used_percent"] == 92.0

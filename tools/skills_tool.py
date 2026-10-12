@@ -121,6 +121,7 @@ skill_matches_environment = _skill_utils_delegate("skill_matches_environment")
 skill_matches_apps = _skill_utils_delegate("skill_matches_apps")
 _parse_frontmatter = _skill_utils_delegate("parse_frontmatter")
 _get_disabled_skill_names = _skill_utils_delegate("get_disabled_skill_names")
+_get_offer_hidden_skill_names = _skill_utils_delegate("get_offer_hidden_skill_names")
 
 
 def check_skills_requirements() -> bool:
@@ -236,8 +237,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> list[dict[str, Any]]:
     """Loadable skills (name, description, category): ``name`` is what skill_view() accepts —
     the declared name, or the exact relative path for a same-tier duplicate. Shadowed and
     unloadable copies are left out. ``skip_disabled=True`` ignores disabled state (config UI)."""
+    offer_hidden = set() if skip_disabled else _get_offer_hidden_skill_names()
     return [{"name": s["load_name"], "description": s["description"], "category": s["category"]}
-            for s in _skill_catalog(skip_disabled=skip_disabled) if s["load_name"]]
+            for s in _skill_catalog(skip_disabled=skip_disabled)
+            if s["load_name"] and s["name"] not in offer_hidden and s["load_name"] not in offer_hidden]
 
 
 def _sort_skills(skills: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -250,12 +253,14 @@ def skills_list(category: str | None = None, task_id: str | None = None) -> str:
     try:
         _skills_dir().mkdir(parents=True, exist_ok=True)
         all_skills = _find_all_skills()
+        offer_hidden = _get_offer_hidden_skill_names()
         try:
             from hermes_cli.plugins import discover_plugins, get_plugin_manager
             discover_plugins()
             for plugin_skill in get_plugin_manager().list_plugin_skill_metadata():
                 frontmatter = plugin_skill.pop("frontmatter", {})
-                if not skill_matches_platform(frontmatter) or _is_skill_disabled(plugin_skill["name"]):
+                if (not skill_matches_platform(frontmatter) or _is_skill_disabled(plugin_skill["name"])
+                        or plugin_skill["name"] in offer_hidden):
                     continue
                 all_skills.append(plugin_skill)
         except Exception:

@@ -95,6 +95,8 @@ Earlier releases used a one-off `curator.auxiliary.{provider,model}` block. That
 ## CLI
 
 ```bash
+hermes curator reconcile-usage # report local usage aliases without changes
+hermes curator reconcile-usage --apply # validate, back up, then atomically reconcile unique aliases
 hermes curator status         # last run, counts, pinned list, LRU top 5
 hermes curator run            # trigger a run now (blocks until done). Prune-only unless curator.consolidate: true
 hermes curator run --consolidate # force the LLM consolidation pass on for this run, overriding the config default
@@ -121,6 +123,14 @@ hermes curator ledger --skill <name> --limit 50  # filter/paginate ledger entrie
 hermes curator rollback <entry-id>  # undo a single mutation from the ledger
 hermes curator purge [--days N] [--dry-run]  # delete archived skills older than the TTL (explicit only)
 ```
+
+### Reconciling usage aliases
+
+The maintained release records unique local skill aliases under the canonical frontmatter
+name. `reconcile-usage` reports older aliases; `--apply` validates the complete sidecar,
+backs up its exact bytes, and writes the reconciled data atomically. Unknown aliases,
+registered plugin names, and ambiguous names are preserved. Two skill directories sharing
+a canonical name keep their explicit path records separate, including during reconciliation.
 
 ## Backups and rollback
 

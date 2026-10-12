@@ -181,6 +181,22 @@ Level 2: skill_view(name, path)  → Specific reference file       (varies)
 
 The agent only loads the full skill content when it actually needs it.
 
+### Keeping installed skills on demand
+
+In the maintained release, `skills.offer_hidden` hides named skills from automatic offers
+(the prompt index, `skills_list`, and filesystem slash-command suggestions), while keeping
+explicit `skill_view` and `--skills` loading available:
+
+```yaml
+skills:
+  offer_hidden:
+    - optional-skill-name
+```
+
+Use canonical skill names. `hermes skills list` keeps these entries visible and marks them
+`on-demand`. Unlike `skills.disabled`, this policy does not block explicit loading. Existing
+conversation prompts remain unchanged until their normal cache boundary.
+
 ### Skills added during a conversation
 
 The list of skills the agent picks from is part of the conversation's system prompt, which stays

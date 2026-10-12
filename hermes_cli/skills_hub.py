@@ -960,7 +960,7 @@ def do_list(source_filter: str = "all", enabled_only: bool = False,
     from tools.skills_hub import HubLockFile, ensure_hub_dirs
     from tools.skills_sync import _read_manifest
     from tools.skills_tool import _skill_catalog
-    from agent.skill_utils import TIER_CREATE_DIR, TIER_EXTERNAL, TIER_PROJECT, get_disabled_skill_names
+    from agent.skill_utils import TIER_CREATE_DIR, TIER_EXTERNAL, TIER_PROJECT, get_disabled_skill_names, get_offer_hidden_skill_names
     from agent.skill_commands import skill_command_collision_note
     c = console or _console
     ensure_hub_dirs()
@@ -970,8 +970,9 @@ def do_list(source_filter: str = "all", enabled_only: bool = False,
     all_skills = [{**s, "name": s["load_name"]} for s in _skill_catalog(skip_disabled=True) if s["load_name"]]
     root_labels = {TIER_PROJECT: "project", TIER_CREATE_DIR: "create_dir", TIER_EXTERNAL: "external"}
     disabled_names = get_disabled_skill_names()
+    offer_hidden_names = get_offer_hidden_skill_names()
 
-    table = _table(("Name", {"style": "bold cyan"}), "Category", "Source", "Trust", "Status",
+    table = _table(("Name", {"style": "bold cyan"}), "Category", "Source", "Trust", "Status", "Offer",
                    title="Installed Skills" + (" (enabled only)" if enabled_only else ""))
 
     counts = {"hub": 0, "builtin": 0, "local": 0}
@@ -996,7 +997,8 @@ def do_list(source_filter: str = "all", enabled_only: bool = False,
         if note := skill_command_collision_note(name):
             status += f"\n[yellow]{note}[/]"
         table.add_row(name, skill.get("category", ""), source_display,
-                      _trust_cell(trust, source_display), status)
+                      _trust_cell(trust, source_display), status,
+                      "[yellow]on-demand[/]" if name in offer_hidden_names else "[dim]default[/]")
 
     c.print(table)
     tail = (f"{enabled_count} enabled shown" if enabled_only

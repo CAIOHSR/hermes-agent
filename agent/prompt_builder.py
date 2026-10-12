@@ -23,7 +23,7 @@ from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
-    TIER_LOCAL, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_skill_search_roots,
+    TIER_LOCAL, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_offer_hidden_skill_names, get_skill_search_roots,
     iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
     skill_matches_platform, skill_matches_platform_list,
 )
@@ -1507,9 +1507,10 @@ def _build_skills_system_prompt_inner(
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
+    offer_hidden = get_offer_hidden_skill_names()
     # Plugin-registered skills (ctx.register_skill) are registry state, not files under any scanned
     # root — the snapshot manifest can't see them change, so they participate in the cache key.
-    plugin_rows = _plugin_skill_prompt_rows(disabled, available_tools, available_toolsets, _platform_hint or None)
+    plugin_rows = _plugin_skill_prompt_rows(disabled | offer_hidden, available_tools, available_toolsets, _platform_hint or None)
     # Skill files are part of the key: another process (a hub install in a second terminal, the curator
     # inside the gateway, a git pull of an external dir) never clears this process's LRU, so a key of
     # config alone served the pre-change index to every running session until restart (#92313).
@@ -1520,7 +1521,7 @@ def _build_skills_system_prompt_inner(
         str(skills_dir), tuple((t, str(d)) for t, d in extra_roots), files,
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
-        _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+        _platform_hint, tuple(sorted(disabled)), tuple(sorted(offer_hidden)), tuple(sorted(compact_categories or ())),
         _oneshot_prompt_variant(), tuple(plugin_rows),
     )
     snapshot = _load_skills_snapshot(skills_dir, manifest)
@@ -1535,7 +1536,7 @@ def _build_skills_system_prompt_inner(
 
     def hides(skill_name: str, conditions: dict) -> bool:
         """Per-build visibility rule shared by every skill source (snapshot, scan, project, external)."""
-        return (skill_name in disabled
+        return (skill_name in disabled or skill_name in offer_hidden
                 or not _skill_should_show(conditions, available_tools, available_toolsets, _platform_hint or None))
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
@@ -1570,7 +1571,7 @@ def _build_skills_system_prompt_inner(
          "visible": ok and not hides(entry.get("skill_name") or "", entry.get("conditions") or {})}
         for entry, ok in rows])
     visible_entries = [e for e in resolved
-                       if e["visible"] and e["status"] != "shadowed" and not is_disabled_entry(e, disabled)]
+                       if e["visible"] and e["status"] != "shadowed" and not is_disabled_entry(e, disabled | offer_hidden)]
     _label_visible_entries(visible_entries, skills_by_category)
     if plugin_rows:
         # Same category label skills_list gives registry skills; qualified names are already

@@ -7,6 +7,9 @@ trivial amount of quota. They run ONLY when the user passes ``hermes doctor --li
 from __future__ import annotations
 
 import os
+import json
+import subprocess
+import uuid
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -62,22 +65,60 @@ def _browser_available() -> bool:
 
 
 def _launch_browser_probe(timeout: float) -> tuple:
-    """Launch a browser, open about:blank, close. Returns (ok, detail). Uses Playwright directly (what
-    agent-browser drives underneath) so the probe owns the full lifecycle and always cleans up."""
+    """Launch a browser, open about:blank, close. Returns (ok, detail).
+
+    Exercise the same agent-browser backend Hermes actually exposes instead
+    of importing Playwright's Python package, which is not a Hermes runtime
+    dependency.  A unique short session keeps the probe isolated and the
+    finally block closes its daemon/browser even when navigation fails.
+    """
+    from tools.browser_tool import _build_browser_env
+    from tools.browser_tool_install import _find_agent_browser, _merge_browser_path
+    from tools.browser_tool_session import _agent_browser_argv
+
+    browser_cmd = _find_agent_browser(validate=True)
+    prefix = _agent_browser_argv(browser_cmd)
+    probe_id = f"hd{uuid.uuid4().hex[:8]}"
+    common = prefix + [
+        "--session", probe_id,
+        "--json",
+    ]
+    env = _build_browser_env()
+    env["PATH"] = _merge_browser_path(env.get("PATH", ""))
+
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return (False, "playwright not installed")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            channel="chromium", executable_path=chromium_executable(),
-            headless=True, timeout=timeout * 1000,
+        result = subprocess.run(
+            common + ["open", "about:blank"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
         )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "agent-browser failed").strip()
+            return (False, detail[:240])
         try:
-            browser.new_page().goto("about:blank", timeout=timeout * 1000)
-        finally:
-            browser.close()
-    return (True, "launched + about:blank + closed")
+            payload = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        if payload and payload.get("success") is not True:
+            return (False, str(payload.get("error") or "agent-browser probe failed")[:240])
+        return (True, "agent-browser launched + about:blank")
+    except subprocess.TimeoutExpired:
+        return (False, f"agent-browser timed out after {timeout:g}s")
+    finally:
+        try:
+            subprocess.run(
+                common + ["close"],
+                capture_output=True,
+                text=True,
+                timeout=min(timeout, 5.0),
+                env=env,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def _probe_mcp_server(name: str, config: dict, timeout: float):

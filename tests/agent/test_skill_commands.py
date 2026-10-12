@@ -451,22 +451,16 @@ class TestScanSkillCommands:
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             scan_skill_commands()
 
-        real_parse = _skills_tool._parse_frontmatter
+        real_scan = skill_commands_module._scan_skill_md
         observed_sizes = []
 
-        def observing_parse(content):
-            # Cache is now _skill_commands_by_key; count skill commands in the cached map (for this identity)
-            key = (
-                skill_commands_module._resolve_skill_commands_platform(),
-                skill_commands_module._resolve_skill_commands_home(),
-                skill_commands_module._resolve_skill_commands_project(),
-            )
-            cached_map = skill_commands_module._skill_commands_by_key.get(key, {})
+        def observing_scan(*args, **kwargs):
+            cached_map = skill_commands_module.get_skill_commands()
             observed_sizes.append(len(cached_map))
-            return real_parse(content)
+            return real_scan(*args, **kwargs)
 
-        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), patch(
-            "tools.skills_tool._parse_frontmatter", observing_parse
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path), patch.object(
+            skill_commands_module, "_scan_skill_md", observing_scan
         ):
             scan_skill_commands()
 

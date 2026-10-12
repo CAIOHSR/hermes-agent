@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Multi-slot skill-command cache keyed by the full resolved identity
 # (_resolve_skill_commands_platform(), _resolve_skill_commands_home(),
-# _resolve_skill_commands_project()). The previous single-slot memo held ONE
+# _resolve_skill_commands_project(), offer_hidden). The previous single-slot memo held ONE
 # (platform, home, project) triple; a Desktop serve process whose identity
 # flaps across requests (profile-home overrides, per-session project roots)
 # missed on every poll and rescanned the whole skills dir ~3x/5s, re-logging
@@ -478,12 +478,18 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: dic
                          "skill_md_path": str(skill_md), "skill_dir": str(skill_md.parent)}
 
 
+def _skill_commands_cache_key() -> tuple:
+    from agent.skill_utils import get_offer_hidden_skill_names
+    return (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project(),
+            frozenset(get_offer_hidden_skill_names()))
+
+
 def scan_skill_commands() -> dict[str, dict[str, Any]]:
     """Scan skill dirs and return {"/skill-name": {name, description, skill_md_path, skill_dir}}.
     Builds a local map and publishes once at the end: writing straight into the
     global exposed partial results to overlapping scans, which then logged
     bogus "already claimed" collisions against their own incumbents."""
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_commands_cache_key()
     # Build into a local map and publish once, at the end. Writing straight into the global made a scan's
     # partial results visible to everything else in the process: a second, overlapping scan deduped against
     # its own (empty) ``seen_names`` but collided against the first scan's already- published slugs, logging
@@ -492,7 +498,7 @@ def scan_skill_commands() -> dict[str, dict[str, Any]]:
     commands: dict[str, dict[str, Any]] = {}
     try:
         from tools.skills_tool import _get_disabled_skill_names, _skill_catalog
-        disabled = _get_disabled_skill_names()
+        disabled = _get_disabled_skill_names() | key[3]
         seen_names: set = set()
         # Only names skill_view resolves to exactly this file get a /command: the shared catalog applies
         # project > local > create_dir > external precedence (live profile dir, #67277) and leaves
@@ -524,7 +530,7 @@ def get_skill_commands() -> dict[str, dict[str, Any]]:
 
     See #14536, #88023, #114359, #104849.
     """
-    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = _skill_commands_cache_key()
     with _publish_lock:
         cached = _skill_commands_by_key.get(key)
     if cached is not None:
@@ -557,7 +563,7 @@ def get_plugin_skill_commands() -> dict[str, dict[str, Any]]:
     Config disable lists (``skills.disabled``, ``plugins.disabled``) are applied on EVERY call, so a
     config-only disable takes effect without a rescan.
     """
-    from agent.skill_utils import get_disabled_skill_names
+    from agent.skill_utils import get_disabled_skill_names, get_offer_hidden_skill_names
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
     from hermes_cli.plugins_discovery import _get_disabled_plugins
     from hermes_constants import get_hermes_home
@@ -570,7 +576,7 @@ def get_plugin_skill_commands() -> dict[str, dict[str, Any]]:
         cached, is_fresh = _plugin_skill_commands, _plugin_skill_commands_tag == tag
     if not is_fresh:
         cached = _scan_plugin_skill_commands(manager, metadata, tag)
-    disabled = get_disabled_skill_names()
+    disabled = get_disabled_skill_names() | get_offer_hidden_skill_names()
     disabled_plugins = _get_disabled_plugins()
     if not disabled and not disabled_plugins:
         return cached
@@ -672,7 +678,7 @@ def reload_skills() -> dict[str, Any]:
         # Preserve only a previously published view. A first-ever reload has
         # no before-state, so discoveries correctly appear as additions.
         with _publish_lock:
-            before_commands = dict(_skill_commands_by_key.get(key, {}))
+            before_commands = dict(_skill_commands_by_key.get(_skill_commands_cache_key(), {}))
             if _plugin_skill_commands_tag and _plugin_skill_commands_tag[0] == key[1]:
                 for command, info in _plugin_skill_commands.items():
                     if command not in before_commands:
