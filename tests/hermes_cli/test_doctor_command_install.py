@@ -131,6 +131,76 @@ def test_fix_preserves_user_managed_commands(tmp_path, monkeypatch, capsys, kind
         assert "manual" in out.lower()
 
 
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("state", ["valid", "missing", "dangling", "wrong", "not-executable", "no-python", "wrapper"])
+def test_hermesctl_launcher_contract(tmp_path, monkeypatch, capsys, fix, state):
+    project, home, command = _tree(tmp_path, monkeypatch)
+    _pm_source(project, home)
+    _generation(project)
+    (project / "install-stamp.json").write_text(json.dumps({
+        "source": "hermesctl", "updateMechanism": "external",
+    }), encoding="utf-8")
+    entry = project / ".venv/bin/hermes"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    entry.chmod(0o755)
+    python = entry.with_name("python")
+    python.symlink_to(sys.executable)
+    # Preserve the control-plane pointer, rather than flattening it to a release.
+    current = tmp_path / "current"
+    current.symlink_to(project, target_is_directory=True)
+    if state == "wrapper":
+        command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        command.chmod(0o755)
+    elif state != "missing":
+        command.symlink_to(project / "hermes" if state == "wrong" else current / ".venv/bin/hermes")
+    if state == "dangling":
+        entry.unlink()
+    elif state == "not-executable":
+        entry.chmod(0o644)
+    elif state == "no-python":
+        python.unlink()
+    before = command.readlink() if command.is_symlink() else None
+
+    finding = doctor_platform._check_command_installation(fix)
+
+    assert finding.fixed == 0
+    assert not finding.issues
+    assert bool(finding.manual_issues) is (state != "valid")
+    assert ("managed by hermesctl" in capsys.readouterr().out) is (state == "valid")
+    if before is not None:
+        assert command.is_symlink() and command.readlink() == before
+    elif state == "missing":
+        assert not command.exists()
+    else:
+        assert command.read_text() == "#!/bin/sh\nexit 0\n"
+
+
+@pytest.mark.platforms("posix")
+@pytest.mark.parametrize("stamp", [
+    {}, {"source": "hermesctl"}, {"updateMechanism": "external"},
+    {"source": "hermesctl", "updateMechanism": "self"},
+    {"source": "other", "updateMechanism": "external"},
+])
+def test_native_pm_contract_is_not_bypassed(tmp_path, monkeypatch, stamp):
+    project, home, command = _tree(tmp_path, monkeypatch)
+    _pm_source(project, home)
+    _generation(project)
+    (project / "install-stamp.json").write_text(json.dumps(stamp), encoding="utf-8")
+    entry = project / ".venv/bin/hermes"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    entry.chmod(0o755)
+    command.symlink_to(entry)
+
+    finding = doctor_platform._check_command_installation(False)
+
+    assert len(finding.issues) == 1
+    assert finding.fixed == 0
+    assert command.is_symlink() and command.resolve() == entry
+
+
 @pytest.mark.parametrize("layout", ["legacy", "generation"])
 @pytest.mark.parametrize("active", [True, False])
 def test_doctor_reports_selected_import_tree_not_interpreter_prefix(tmp_path, monkeypatch, capsys, layout, active):

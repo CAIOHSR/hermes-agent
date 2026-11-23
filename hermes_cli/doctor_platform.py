@@ -603,6 +603,29 @@ def _check_command_installation(should_fix: bool, f: Finding) -> None:
             check_warn(f"Hermes command not on PATH ({method}-managed)")
             f.manual_issues.append(_python_repair_hint())
         return
+    from hermes_cli.steward import read_install_stamp
+
+    stamp = read_install_stamp(PROJECT_ROOT)
+    if stamp.get("source") == "hermesctl" and stamp.get("updateMechanism") == "external":
+        # hermesctl owns the release pointer and publishes a console entry point,
+        # not a PM launcher. Never replace its command, even when it is broken.
+        entry = PROJECT_ROOT / ".venv" / "bin" / "hermes"
+        python = entry.with_name("python")
+        command = Path.home() / ".local" / "bin" / "hermes"
+        try:
+            valid = (
+                entry.is_file() and os.access(entry, os.X_OK)
+                and python.is_file() and os.access(python, os.X_OK)
+                and command.is_symlink()
+                and command.resolve(strict=True) == entry.resolve(strict=True)
+            )
+        except (OSError, RuntimeError):
+            valid = False
+        if valid:
+            return check_ok(f"Hermes command managed by hermesctl ({command} → {entry})")
+        check_fail("Invalid hermesctl launcher", f"({command}, expected executable → {entry})")
+        return f.manual_issues.append("Repair the externally managed Hermes launcher through hermesctl; doctor did not change it")
+
     from hermes_cli._launchers import resolve_store_python
     from pm.environments import base_venv, selected_venv
 
